@@ -1455,6 +1455,11 @@ CHART_PAGE = """<!doctype html>
   /* 24h 成交额 / 持仓名义价值（每个品种都显示，用币安数据） */
   .vol{flex:0 0 auto;color:#6e7681;font-size:10.5px;
        font-variant-numeric:tabular-nums;min-width:46px;text-align:right}
+  /* 图表顶部条上的成交额 / 持仓：跟着**当前正在看的那个品种**走。
+     用户要求："持仓和成交量显示在每一个品种的图表上，不要在那个左边侧边里显示，
+     要不然数字太多太乱了"。 */
+  #vol24,#oi{color:#8b949e;font-size:11px;margin-left:11px;white-space:nowrap;
+             font-variant-numeric:tabular-nums}
   .vol.oi{color:#7d8590}
   body.scan .it.cur .vol{color:#dbe4f0}
   /* 收藏 ♥（点一下就收藏，收藏的实心变红） */
@@ -1516,6 +1521,7 @@ CHART_PAGE = """<!doctype html>
   body.day .px{color:#59636e}
   body.day .vol{color:#8c959f}
   body.day .vol.oi{color:#59636e}
+  body.day #vol24,body.day #oi{color:#59636e}
   body.day .up{color:#1a7f37}
   body.day .down{color:#cf222e}
   body.day .tag{color:#9a6700;border-color:#d4a72c;background:#fff8c5}
@@ -1530,6 +1536,8 @@ CHART_PAGE = """<!doctype html>
 <body>
 <div id="bar">当前：<span id="sym">等待行情条…</span>
   <span id="px"></span>
+  <span id="vol24" title="24 小时成交额（币安）"></span>
+  <span id="oi" title="持仓名义价值 = 持仓量 × 现价（币安没有批量接口，慢慢补）"></span>
   <span id="periods"></span>
   <span id="draw" title="点第一下放起点、第二下成线；可以接着画下一条，Esc 退出">✏ 画趋势线</span>
   <span id="undo" title="撤销最后一条趋势线（Ctrl+Z）">↶ 撤销</span>
@@ -1546,7 +1554,7 @@ CHART_PAGE = """<!doctype html>
     <div id="scantools">
       <input id="scanq" placeholder="筛选：BTC / 黄金 / 股票…" autocomplete="off" spellcheck="false">
       <div id="scancats"></div>
-      <div id="scanhint">↑↓ 快速切下一个 · 价 · 24h额 · 持仓 · 涨跌</div>
+      <div id="scanhint">↑↓ 快速切下一个 · 点一行换图（成交额/持仓显示在图上方）</div>
       <div id="scanacts">
         <span class="chip" id="favcopy" title="把收藏的品种按 TradingView 符号格式复制到剪贴板">⧉ 复制收藏</span>
         <span class="chip" id="favtv" title="用你自己的浏览器打开 TradingView（带你的登录/画线）">★ 我的 TradingView</span>
@@ -2479,8 +2487,6 @@ function paintScan(){
           +   '<span class="nm">'+esc(r.base)+'</span>'
           +   (r.kind === 'tradfi' ? '<span class="tag">'+esc(r.cat)+'</span>' : '')
           +   '<span class="px">'+scanFmt(r.price)+'</span>'
-          +   '<span class="vol">'+scanBig(r.volume)+'</span>'
-          +   '<span class="vol oi">'+(r.oi ? scanBig(r.oi) : '--')+'</span>'
           +   '<span class="pct '+(r.change>=0?'up':'down')+'">'+pct+'</span>'
           + '</div>';
   }
@@ -2657,6 +2663,12 @@ function tick(){
     }
     // 主题变了就原地换（不用刷新页面）
     if(j.theme && j.theme !== THEME){ THEME = j.theme; applyTheme(); }
+    // ★ 图上方显示当前品种的 24h 成交额 / 持仓名义价值。
+    //   注意要放在下面那个 `return` **之前** —— 那个 return 在"品种没变"时会
+    //   提前退出，放后面的话数字永远不会刷新（每秒轮询本来就该刷这两个数）。
+    var vEl = document.getElementById('vol24'), oEl = document.getElementById('oi');
+    if(vEl) vEl.textContent = '24h额 ' + (j.vol24 ? scanBig(j.vol24) : '--');
+    if(oEl) oEl.textContent = '持仓 ' + (j.oi ? scanBig(j.oi) : '--');
     // ⚠️ 这里用 split('|')[0] 比较：pick()/scanPick() 会把 cur 设成**裸 base**，
     // 而 /api/symbol 给的是 "BASE|QUOTE"。不这样比的话，每次换图都会
     // 被这一秒的轮询**再拉一次** K 线（扫盘时就是双倍流量）。
@@ -3264,6 +3276,7 @@ class TickerApp:
         self._symbol_universe = None       # 永续合约清单（后台预热）
         self._match_universe = None        # 输入框模糊匹配名单（加密 + TradFi）
         self._match_loading = False
+        self._extras_loading = False       # 图表页"成交额/持仓"名单是否在后台准备
         self._market_overview = None       # 榜单数据
         self._symbols_loading = False
         self._flash = {}                   # (base,quote) -> (方向, 起始时间)
@@ -5712,6 +5725,43 @@ class TickerApp:
 
     # ------------------------------------------------------ 图表页 --
 
+    def symbol_extras(self, base):
+        """当前品种的 24h 成交额 + 持仓名义价值（给图表上方那条用）。
+
+        数据来自**全品种缓存**（`load_all_symbols`：741 个品种，加密 + TradFi）。
+        ⚠️ 缓存没准备好时**绝不阻塞请求**（这是每秒轮询的接口）：
+        先返回 (None, None) 让页面显示 `--`，同时后台去准备，下一秒就有数了。
+        """
+        want = str(base or "").upper()
+        try:
+            with _ALL_LOCK:
+                rows = _ALL_CACHE.get("rows")
+        except Exception:
+            rows = None
+        if rows:
+            for row in rows:
+                if str(row.get("base", "")).upper() == want:
+                    return row.get("volume"), row.get("oi")
+            return None, None        # 名单里有，但这个品种查不到（比如现货）
+        self._kick_extras()
+        return None, None
+
+    def _kick_extras(self):
+        """后台备一份全品种名单（图表页要成交额/持仓）。同一时间只跑一个。"""
+        if getattr(self, "_extras_loading", False):
+            return
+        self._extras_loading = True
+
+        def work():
+            try:
+                load_all_symbols()          # 内部会把 oi 也补上（_kick_oi_refresh）
+            except Exception as exc:
+                log(f"图表页成交额/持仓准备失败: {exc}")
+            finally:
+                self._extras_loading = False
+
+        threading.Thread(target=work, daemon=True).start()
+
     def chart_symbol(self):
         """给图表页轮询用。
 
@@ -5720,8 +5770,11 @@ class TickerApp:
         之前在这里查拼音，导致每次切品种页面都要卡 1.5 秒。
         """
         base, quote = self._chart_target
+        vol24, oi = self.symbol_extras(base)
         return {"key": f"{base}|{quote}", "name": base,
                 "base": base, "quote": quote,
+                # 图上方那两个数字：24h 成交额 / 持仓名义价值（可能暂时为 None）
+                "vol24": vol24, "oi": oi,
                 # 让页面知道该显示哪一张：行情图表 / 全品种扫盘。
                 # 这样"点一下全品种扫盘"是把**已经开着的那个页面**切过去，
                 # 而不是每点一次多开一个标签页。
