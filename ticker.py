@@ -3271,6 +3271,7 @@ class TickerApp:
         self._sig = None                   # 上次整块重画时的"结构签名"
         self._tape_items = []              # 滚动字幕的文字对象池（复用，不重画）
         self._tape_sig = None
+        self._tape_period = 0.0            # 一遍完整内容的总宽度（偏移按它取模）
         self._anim_job = None
         self._icon_geom = []               # 行尾图标命中区（闹铃/垃圾桶）
         self._icon_pending = None          # 本次按下落在哪个图标上
@@ -4447,7 +4448,10 @@ class TickerApp:
         if not self._tape_enabled() or self._hidden:
             return
         if self._tape_width > 0:
-            self._tape_offset = (self._tape_offset + 1.4) % self._tape_width
+            # ⚠️ 偏移要按"内容周期"取模，**不能**按控件宽度取模：
+            #    按宽度取模时 offset 从 width 跳回 0，字幕会周期性卡一下。
+            period = self._tape_period or self._tape_width
+            self._tape_offset = (self._tape_offset + 1.4) % period
             self._draw_tape()
         self._tape_job = self.root.after(45, self._tape_tick)
 
@@ -4473,22 +4477,35 @@ class TickerApp:
             return
         width = max(self.tape.winfo_width(), 1)
         mid = self._tape_h / 2
-        sig = (font, tuple((t, c) for t, c, _b in segs))
         total = sum(f.measure(t) for t, _c, _b in segs) or 1
-        if sig != self._tape_sig:
-            # 内容/字体变了才重建对象池
+        self._tape_period = total
+        reps = int(width / total) + 2
+        want = reps * len(segs)
+        # ⚠️ 重建条件必须包含 **reps（也就是控件宽度）**！
+        #    只比字体和文字的话，窗口一变宽就不会补建对象，
+        #    结果是"滚动条右半边永远是空的"（用户报过"不能正常显示"）。
+        #    颜色/字体/条数变了才需要重建对象；单纯文字变了只改字。
+        sig = (font, len(segs), tuple(c for _t, c, _b in segs), reps)
+        if sig != self._tape_sig or len(self._tape_items) != want:
             cv.delete("all")
             self._tape_items = []
-            reps = int(width / total) + 2
             for rep in range(reps):
-                for text, color, base in segs:
+                for si, (text, color, base) in enumerate(segs):
                     it = cv.create_text(0, mid, text=text, anchor="w",
                                         font=font, fill=color)
-                    self._tape_items.append((it, rep, f.measure(text), base))
+                    self._tape_items.append([it, rep, f.measure(text), base, si, text])
             self._tape_sig = sig
+        else:
+            # 价格数字变了：只把改过的那几条 itemconfigure，不重建对象
+            for entry in self._tape_items:
+                _it, _rep, _w, _base, si, last = entry
+                text = segs[si][0]
+                if text != last:
+                    entry[5] = text
+                    cv.itemconfigure(entry[0], text=text)
         off = self._tape_offset % total
         hits = []
-        for it, rep, seg_w, base in self._tape_items:
+        for it, rep, seg_w, base, _si, _t in self._tape_items:
             x = rep * total - off
             cv.coords(it, x, mid)
             if base and -seg_w < x < width:
