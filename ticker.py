@@ -3267,6 +3267,10 @@ class TickerApp:
         self._market_overview = None       # 榜单数据
         self._symbols_loading = False
         self._flash = {}                   # (base,quote) -> (方向, 起始时间)
+        self._live = {}                    # 每行价格/涨跌的文字对象 id（原地更新用）
+        self._sig = None                   # 上次整块重画时的"结构签名"
+        self._tape_items = []              # 滚动字幕的文字对象池（复用，不重画）
+        self._tape_sig = None
         self._anim_job = None
         self._icon_geom = []               # 行尾图标命中区（闹铃/垃圾桶）
         self._icon_pending = None          # 本次按下落在哪个图标上
@@ -3986,7 +3990,9 @@ class TickerApp:
                 for dx, dy in ring:
                     cv.create_text(x + dx, y + dy, text=text, font=font,
                                    fill=pal["outline"], anchor=anchor)
-            cv.create_text(x, y, text=text, font=font, fill=fill, anchor=anchor)
+            # 返回主文字对象的 id：价格闪烁时只 itemconfigure 改颜色，
+            # 不再整块 delete("all") 重画（那正是"字一直在闪"的根源）
+            return cv.create_text(x, y, text=text, font=font, fill=fill, anchor=anchor)
 
         # ---- 表头（默认关闭，省地方）----
         if show_header:
@@ -4017,6 +4023,8 @@ class TickerApp:
             except Exception:
                 alerted = set()
         icon_right = width - pad
+        live = {}
+        self._live = live            # 同一个 dict：下面的循环往里塞价格/涨跌文字对象
         for idx, (base, quote_) in enumerate(pairs):
             row_top = pad + header_h + row_h * idx
             cy = row_top + row_h // 2
@@ -4026,9 +4034,9 @@ class TickerApp:
             price_color = pal["price"] if (fresh or not self.rows) else pal["dim"]
             if item is None:
                 put(pad, cy, base, f_sym, pal["sym"], "w")
-                put(price_right, cy, "—", f_num, pal["dim"], "e")
-                if show_change:
-                    put(chg_right, cy, "—", f_num, pal["dim"], "e")
+                pid = put(price_right, cy, "—", f_num, pal["dim"], "e")
+                cid = put(chg_right, cy, "—", f_num, pal["dim"], "e") if show_change else None
+                live[(base, quote_)] = (pid, cid)
             else:
                 change = item["change"]
                 color = (up_color if change >= 0 else down_color) if colored else pal["change"]
@@ -4045,9 +4053,11 @@ class TickerApp:
                                                  k * k)
 
                 put(pad, cy, base, f_sym, pal["sym"], "w")
-                put(price_right, cy, fmt_price(item["price"]), f_num, price_color, "e")
-                if show_change:
-                    put(chg_right, cy, f"{change:+.2f}%", f_num, color, "e")
+                pid = put(price_right, cy, fmt_price(item["price"]), f_num,
+                          price_color, "e")
+                cid = put(chg_right, cy, f"{change:+.2f}%", f_num, color, "e") \
+                    if show_change else None
+                live[(base, quote_)] = (pid, cid)
 
             # ---- 品种名后的「仓位 / 关注价位」小按钮 + 标记 ----
             # 小按钮是个"靶心"：没设过是暗灰的，设过就染成标记色（多=红 空=绿 看=琥珀）。
@@ -4442,32 +4452,48 @@ class TickerApp:
         self._tape_job = self.root.after(45, self._tape_tick)
 
     def _draw_tape(self):
+        """滚动字幕：**复用同一批文字对象**，每帧只改 x 坐标。
+
+        ⚠️ 以前是每 45ms `delete("all")` 再重建一遍文字 —— Tk 画布没有双缓冲，
+        实测就是"顶部字幕一直在闪"。改成"建一次、之后只 coords() 移动"，
+        既不闪也快得多（不用反复分配画布对象）。
+        """
         cv = self.tape
-        cv.delete("all")
-        self._tape_hits = []
         segs = self._tape_segs
         if not segs or self._tape_width <= 0 or self._tape_h <= 0:
+            if self._tape_items:
+                cv.delete("all")
+                self._tape_items = []
+                self._tape_sig = None
             return
         font = self._tape_font
-        width = max(self.tape.winfo_width(), 1)
         try:
             f = tkfont.Font(root=self.root, font=font)
         except Exception:
             return
-        x = -self._tape_offset
+        width = max(self.tape.winfo_width(), 1)
         mid = self._tape_h / 2
-        guard = 0
-        # x 单调递增，各片段区间互不重叠，可以直接记录命中范围
-        while x < width and guard < 500:
-            for text, color, base in segs:
-                if x > width:
-                    break
-                cv.create_text(x, mid, text=text, anchor="w", font=font, fill=color)
-                w = f.measure(text)
-                if base:
-                    self._tape_hits.append((x, x + w, base))
-                x += w
-            guard += 1
+        sig = (font, tuple((t, c) for t, c, _b in segs))
+        total = sum(f.measure(t) for t, _c, _b in segs) or 1
+        if sig != self._tape_sig:
+            # 内容/字体变了才重建对象池
+            cv.delete("all")
+            self._tape_items = []
+            reps = int(width / total) + 2
+            for rep in range(reps):
+                for text, color, base in segs:
+                    it = cv.create_text(0, mid, text=text, anchor="w",
+                                        font=font, fill=color)
+                    self._tape_items.append((it, rep, f.measure(text), base))
+            self._tape_sig = sig
+        off = self._tape_offset % total
+        hits = []
+        for it, rep, seg_w, base in self._tape_items:
+            x = rep * total - off
+            cv.coords(it, x, mid)
+            if base and -seg_w < x < width:
+                hits.append((x, x + seg_w, base))
+        self._tape_hits = hits
 
     def _on_tape_press(self, event):
         if self._blocked():
@@ -7478,7 +7504,11 @@ class TickerApp:
             pass
 
         if dirty or not self._painted:
-            self.render()
+            # ★ 先试原地更新（只改价格/涨跌文字）—— 结构没变就不整块重画，
+            #   这样"每 3 秒数据一到就闪一下"也没了。
+            if not self._update_prices():
+                self.render()
+                self._sig = self._price_signature()
             self._painted = True
             self._ensure_anim()
         self.root.after(250, self._pump)
@@ -7486,6 +7516,87 @@ class TickerApp:
     _painted = False
 
     # ------------------------------------------------------ 闪烁动画 --
+
+    def _is_fresh(self):
+        """行情是否"新鲜"（决定价格用正常色还是变暗）。"""
+        return (time.time() - (self.last_ok or 0)) < 12 or not self.rows
+
+    def _row_colors(self, item, key):
+        """一行的（价格色, 涨跌色），含价格闪烁插值。
+
+        ⚠️ render() 和 `_update_prices()` 必须用**同一套**取色逻辑，
+        否则"原地更新"和"整块重画"会画出两种颜色（改一边记得改另一边）。
+        """
+        cfg = self.cfg
+        float_mode = str(cfg.get("style", "float")).lower() == "float"
+        day = getattr(self, "theme", "night") == "day"
+        pal = text_palette(cfg) if float_mode else (DARK_TEXT if day else LIGHT_TEXT)
+        price_color = pal["price"] if self._is_fresh() else pal["dim"]
+        flip = str(cfg.get("scheme", "west")).lower() == "cn"
+        colored = bool(cfg.get("change_colored", False))
+        change = float(item.get("change") or 0.0)
+        if colored:
+            color = (UP_CN if flip else UP_WEST) if change >= 0 else \
+                (DOWN_CN if flip else DOWN_WEST)
+        else:
+            color = pal["change"]
+        flash = self._flash.get(key)
+        if flash:
+            direction, started = flash
+            elapsed_ms = (time.time() - started) * 1000.0
+            if elapsed_ms < FLASH_MS:
+                k = 1.0 - (elapsed_ms / FLASH_MS)
+                price_color = lerp_color(
+                    price_color, FLASH_UP if direction > 0 else FLASH_DOWN, k * k)
+        return price_color, color
+
+    def _price_signature(self):
+        """影响"要不要整块重画"的东西。
+
+        价格和涨跌幅**故意不在**里面 —— 它们走 `_update_prices()` 原地改
+        （整块 delete("all") 重画正是"字一直闪"的根源）。
+        结构/配色/字体/品种集合变了，才需要重新整块画。
+        """
+        cfg = self.cfg
+        return (tuple(self.pairs), self._win_w, self._win_h,
+                int(cfg.get("font_size", 9)), str(cfg.get("style")),
+                str(cfg.get("scheme")), str(cfg.get("text_color")),
+                str(cfg.get("text_effect")), getattr(self, "theme", ""),
+                bool(cfg.get("show_change")), bool(cfg.get("change_colored")),
+                bool(cfg.get("show_levels")), bool(cfg.get("show_header")),
+                bool(cfg.get("show_alert")), bool(cfg.get("show_del")),
+                self.error, self.source, self._is_fresh(), len(self.rows))
+
+    def _update_prices(self):
+        """原地改价格/涨跌的文字和颜色（不 delete、不重建）→ 一点都不闪。
+
+        返回 True = 原地更新够了；False = 结构变了，调用方应该 `render()`。
+        """
+        live = getattr(self, "_live", None)
+        if not live or getattr(self, "_sig", None) != self._price_signature():
+            return False
+        f_num = self._font("num", int(self.cfg.get("font_size", 9)))
+        for base, quote_ in self.pairs:
+            ids = live.get((base, quote_))
+            if not ids:
+                return False
+            pid, cid = ids
+            item = self.rows.get((base, quote_))
+            try:
+                if item is None:
+                    self.canvas.itemconfigure(pid, text="—")
+                    if cid:
+                        self.canvas.itemconfigure(cid, text="—")
+                else:
+                    price_color, color = self._row_colors(item, (base, quote_))
+                    self.canvas.itemconfigure(pid, text=fmt_price(item["price"]),
+                                              fill=price_color, font=f_num)
+                    if cid:
+                        self.canvas.itemconfigure(
+                            cid, text=f"{item['change']:+.2f}%", fill=color)
+            except Exception:
+                return False
+        return True
 
     def _ensure_anim(self):
         """有闪烁就启动动画循环（渲染本身是 3 秒一次，闪烁需要更快）。"""
@@ -7500,7 +7611,12 @@ class TickerApp:
         now = time.time()
         self._flash = {k: v for k, v in self._flash.items()
                        if (now - v[1]) * 1000.0 < FLASH_MS}
-        self.render()
+        # ★ 只把变色的那几行价格原地改掉。以前这里每帧调 render()，
+        #   而 render() 第一行是 cv.delete("all") —— 于是价格一变，
+        #   整个窗口就以 15~25 帧/秒被全删重画，肉眼就是"字一直在闪"。
+        if not self._update_prices():
+            self.render()
+            self._sig = self._price_signature()
         if self._flash:
             self._anim_job = self.root.after(FLASH_FRAME_MS, self._anim_tick)
 
