@@ -274,16 +274,19 @@ def ui_chip(parent, text, command, on=False, font=None):
 
 
 def ui_header(parent, text, note=""):
-    """段落标题：左侧一条主色竖条 + 灰字 +（可选）右侧浅色说明。"""
+    """段落标题：左侧一条主色竖条 + 标题 +（可选）右侧浅色说明。
+
+    v0.20：标题和竖条都做大一点（用户嫌界面挤、要 QQ 那种留白感）。
+    """
     row = tk.Frame(parent, bg=UI_BG)
-    bar = tk.Frame(row, bg=UI_ACCENT, width=3, height=13)
-    bar.pack(side="left", padx=(0, 7))
+    bar = tk.Frame(row, bg=UI_ACCENT, width=3, height=16)
+    bar.pack(side="left", padx=(0, 9))
     bar.pack_propagate(False)
     tk.Label(row, text=text, bg=UI_BG, fg=UI_FG,
-             font=(ui_font_family(parent), 10)).pack(side="left")
+             font=(ui_font_family(parent), 11)).pack(side="left")
     if note:
         tk.Label(row, text=note, bg=UI_BG, fg=UI_FAINT,
-                 font=(ui_font_family(parent), 8)).pack(side="left", padx=(8, 0))
+                 font=(ui_font_family(parent), 8)).pack(side="left", padx=(10, 0))
     return row
 
 
@@ -293,16 +296,18 @@ def ui_sep(parent, pady=8):
     return f
 
 
-def ui_toggle(parent, text, var, command, font=None, width=44, pad=7):
+def ui_toggle(parent, text, var, command, font=None, width=50, pad=13):
     """一行开关：左边说明，右边一个"药丸"开关。
 
     为什么不用原生 Checkbutton：它在深色/浅色下都是系统样式，方框 + 对勾
     和这套扁平 UI 完全不搭。
+    v0.20：开关做大（50×22）、行距加大 —— 用户说"界面太挤、UI 太丑，
+    学学 QQ 的设置"，QQ 那种就是大留白 + 大控件。
     """
     row = tk.Frame(parent, bg=UI_BG)
     tk.Label(row, text=text, bg=UI_BG, fg=UI_FG, font=font,
              anchor="w").pack(side="left")
-    cv = tk.Canvas(row, width=width, height=18, bg=UI_BG,
+    cv = tk.Canvas(row, width=width, height=22, bg=UI_BG,
                    highlightthickness=0, bd=0, cursor="hand2")
     cv.pack(side="right")
     state = {"on": bool(var.get())}
@@ -312,11 +317,11 @@ def ui_toggle(parent, text, var, command, font=None, width=44, pad=7):
         on = state["on"]
         track = (UI_ACCENT_BG if on else (UI_HOVER if hover else UI_PANEL2))
         edge = UI_ACCENT_BG if on else UI_BORDER
-        cv.create_oval(1, 3, 15, 17, fill=track, outline=edge)
-        cv.create_oval(width - 15, 3, width - 1, 17, fill=track, outline=edge)
-        cv.create_rectangle(8, 3, width - 8, 17, fill=track, outline=edge)
-        cx = (width - 9) if on else 9
-        cv.create_oval(cx - 5, 4, cx + 5, 14, fill="#ffffff", outline="")
+        cv.create_oval(1, 3, 19, 21, fill=track, outline=edge)
+        cv.create_oval(width - 19, 3, width - 1, 21, fill=track, outline=edge)
+        cv.create_rectangle(10, 3, width - 10, 21, fill=track, outline=edge)
+        cx = (width - 11) if on else 11
+        cv.create_oval(cx - 6, 5, cx + 6, 17, fill="#ffffff", outline="")
 
     def toggle(_e=None):
         state["on"] = not state["on"]
@@ -336,7 +341,7 @@ def ui_toggle(parent, text, var, command, font=None, width=44, pad=7):
     return row
 
 
-def ui_choice(parent, text, options, var, command, font=None, pad=7):
+def ui_choice(parent, text, options, var, command, font=None, pad=13):
     """一行单选：左边说明，右边一排胶囊。options = [(显示名, 值), …]"""
     row = tk.Frame(parent, bg=UI_BG)
     tk.Label(row, text=text, bg=UI_BG, fg=UI_FG, font=font,
@@ -3361,6 +3366,9 @@ class TickerApp:
         self._pick_win = None           # 已废弃：下拉不再用独立弹窗
         self._pick_box = None           # 当前展开的那一组列表控件
         self._pick_items = None         # 当前展开那一组的榜单数据
+        self._tradfi_rows = []          # 币安 TradFi（股票/贵金属/原油/指数）名单
+        self._tradfi_loading = False
+        self._tradfi_cat = "股票"        # 「美股·贵金属·原油」组里当前选中的分类
         self._board_panels = {}         # {"topVolume": {row, body, items, open…}}
         self._board_open = None         # 当前展开的组（手风琴，一次一组）
 
@@ -3862,11 +3870,14 @@ class TickerApp:
         chg_w = f_num.measure("-00.00%") + 2 if show_change else 0
 
         # 仓位 / 关注价位标记列（品种名右边）：
-        # 一个小按钮（尺寸固定）+ 一枚小字标签。用户要求标签字号**小于价格数字**、
-        # 颜色也要能区分，所以这里用 UI 字体 + size-2，而不是价格那套数字字体。
+        # 一个固定尺寸小按钮 + 标签。
+        # ⚠️ 用户后来改口了（v0.20）：「持仓那个多和空还是只关注那个数字，
+        #    还是调得跟右边那个行情价一样大吧，在窗口里有点看不清楚，
+        #    一样大就行，只要有颜色区分就够了」——
+        #    所以这里用**和价格同号**的字（UI 字体保证中文能显示，数字字体没汉字）。
         show_levels = bool(cfg.get("show_levels", True))
-        f_tag = self._font("ui", max(7, size - 2))
-        LEV_BTN_W = 11
+        f_tag = self._font("ui", max(7, size))
+        LEV_BTN_W = max(11, int(round(size * 1.25)))   # 跟着字号一起长
         lev_tag_w = 0
         if show_levels:
             for _base, _q in pairs:
@@ -5961,7 +5972,15 @@ class TickerApp:
 
         wrap = tk.Frame(panel["body"], bg=UI_ACCENT_BG, padx=1, pady=1)
         wrap.pack(fill="x", padx=8, pady=(0, 4))
-        lb = ui_style_listbox(tk.Listbox(wrap, height=len(items), width=30,
+        cats_row = None
+        host = wrap
+        if panel.get("cats"):
+            # TradFi 组：先摆一排分类胶囊，下面是该分类成交额前 10
+            cats_row = tk.Frame(wrap, bg=UI_BG)
+            cats_row.pack(fill="x", padx=4, pady=(3, 2))
+            host = tk.Frame(wrap, bg=UI_BG)
+            host.pack(fill="both", expand=True)
+        lb = ui_style_listbox(tk.Listbox(host, height=len(items), width=30,
                                          font=(self.ui, 9)))
         lb.pack(fill="both", expand=True)
         self._pick_box = lb
@@ -5986,6 +6005,14 @@ class TickerApp:
             return {str(s).upper().split("-")[0] for s in raw}
 
         def redraw():
+            # ⚠️ 面板可能已经被收起/重建（TradFi 名单是后台抓的，抓完会重摆榜单），
+            #    那时候 Listbox 已经销毁 —— 再碰它就是 TclError:
+            #    bad window path name "...!listbox"。所以先确认还活着。
+            try:
+                if not lb.winfo_exists():
+                    return
+            except Exception:
+                return
             added = watched()
             lb.delete(0, "end")
             for idx, item in enumerate(items, 1):
@@ -6006,6 +6033,10 @@ class TickerApp:
                 except Exception:
                     pass
             state["job"] = None
+
+        # 让"收起这一组 / 重建榜单"的时候能把定时刷新任务一并取消
+        # （不取消的话，任务随后会去碰已经销毁的 Listbox → TclError）
+        self._pick_cancel = cancel
 
         def name_at(idx):
             return str(items[idx].get("base")) if 0 <= idx < len(items) else None
@@ -6041,6 +6072,27 @@ class TickerApp:
             self._pick_open_chart(idx)
             return "break"
 
+        if cats_row is not None:
+            chips = {}
+
+            def switch(cat):
+                """切分类：原地换 items（引用不变，所以单击/双击的绑定照样有效）。"""
+                self._tradfi_cat = cat
+                items[:] = self._tradfi_top(cat, 10)
+                panel["items"] = items
+                for name, chip in chips.items():
+                    chip.ui_set(name == cat)
+                lb.configure(height=max(1, len(items)))
+                redraw()
+                lb.selection_clear(0, "end")
+
+            for cname, _cats in self.TRADFI_CATS:
+                chip = ui_chip(cats_row, cname, lambda c=cname: switch(c),
+                               on=(self._tradfi_cat == cname),
+                               font=(self.ui, 8))
+                chip.pack(side="left", padx=(0, 4))
+                chips[cname] = chip
+
         lb.bind("<ButtonRelease-1>", on_release)
         lb.bind("<Double-Button-1>", on_double)
         lb.bind("<Escape>", lambda _e: (self._close_pick_list(), "break")[1])
@@ -6049,6 +6101,14 @@ class TickerApp:
 
     def _collapse_board_group(self):
         """收起当前展开的那一组（列表控件一并销毁）。"""
+        # 先取消那一组的定时刷新任务，再销毁控件 —— 顺序反了就会 TclError
+        cancel = getattr(self, "_pick_cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                pass
+        self._pick_cancel = None
         panels = getattr(self, "_board_panels", None) or {}
         key = getattr(self, "_board_open", None)
         panel = panels.get(key) if key else None
@@ -6066,6 +6126,12 @@ class TickerApp:
         except Exception:
             pass
         panel["open"] = False
+        # 之前因为"正展开着"而推迟的榜单重建，现在可以补上了
+        if getattr(self, "_board_stale", False):
+            self._board_stale = False
+            rb = getattr(self, "_board_rebuild", None)
+            if callable(rb):
+                self.root.after(80, rb)      # 等这次点击处理完再重建
 
 
     # ---------------------------------------------------- 品种选择器 --
@@ -6569,6 +6635,11 @@ class TickerApp:
                       ("data", "数据与榜单"), ("alerts", "提醒"),
                       ("keys", "热键"), ("symbols", "品种"), ("about", "关于"))
 
+    # 左边分类的小图标（QQ 的设置那种：图标 + 文字，行高留白大）。
+    # 都用基本区符号，不依赖 emoji 字体，各机器一致。
+    SETTINGS_ICONS = {"display": "▤", "look": "◐", "theme": "☾", "data": "▦",
+                      "alerts": "◔", "keys": "⌘", "symbols": "★", "about": "ⓘ"}
+
     def open_settings(self, page=None):
         """设置中心：左边分类导航，右边内容。
 
@@ -6593,22 +6664,23 @@ class TickerApp:
         win.resizable(False, False)
         win.configure(bg=UI_BG, highlightthickness=1, highlightbackground=UI_BORDER)
         win.attributes("-topmost", True)
-        w, hgt = 648, 486
+        # v0.20：窗口放大、留白加大（用户说"界面太多太挤、学学 QQ 的设置"）
+        w, hgt = 726, 566
         px = max(0, min(self._pos[0] - w - 20, self.root.winfo_screenwidth() - w - 10))
         py = max(0, min(self._pos[1], self.root.winfo_screenheight() - (hgt + 20)))
         win.geometry(f"{w}x{hgt}+{px}+{py}")
-        fnt = (self.ui, 9)
+        fnt = (self.ui, 10)
 
         # ---- 自绘标题栏（可拖动 + ✕）----
-        tbar = tk.Frame(win, bg=UI_BG, height=40)
+        tbar = tk.Frame(win, bg=UI_BG, height=48)
         tbar.pack(fill="x")
         tbar.pack_propagate(False)
         tk.Label(tbar, text="设置", bg=UI_BG, fg=UI_FG,
-                 font=(self.ui, 11)).pack(side="left", padx=(16, 0))
+                 font=(self.ui, 12)).pack(side="left", padx=(20, 0))
         tk.Label(tbar, text="行情条 · 全品种扫盘 · 提醒", bg=UI_BG, fg=UI_FAINT,
-                 font=(self.ui, 8)).pack(side="left", padx=(8, 0))
-        close_x = tk.Label(tbar, text="✕", bg=UI_BG, fg=UI_DIM, padx=15,
-                           font=(self.ui, 10), cursor="hand2")
+                 font=(self.ui, 8)).pack(side="left", padx=(10, 0))
+        close_x = tk.Label(tbar, text="✕", bg=UI_BG, fg=UI_DIM, padx=18,
+                           font=(self.ui, 11), cursor="hand2")
         close_x.pack(side="right", fill="y")
         close_x.bind("<Enter>", lambda _e: close_x.configure(fg=UI_DANGER, bg=UI_HOVER))
         close_x.bind("<Leave>", lambda _e: close_x.configure(fg=UI_DIM, bg=UI_BG))
@@ -6628,12 +6700,12 @@ class TickerApp:
 
         body = tk.Frame(win, bg=UI_BG)
         body.pack(fill="both", expand=True)
-        rail = tk.Frame(body, bg=UI_BG, width=152)
+        rail = tk.Frame(body, bg=UI_BG, width=186)
         rail.pack(side="left", fill="y")
         rail.pack_propagate(False)
         tk.Frame(body, bg=UI_BORDER, width=1).pack(side="left", fill="y")
         holder = tk.Frame(body, bg=UI_BG)
-        holder.pack(side="left", fill="both", expand=True, padx=18, pady=(14, 12))
+        holder.pack(side="left", fill="both", expand=True, padx=26, pady=(20, 16))
 
         def close():
             self._cfg_win = None
@@ -6652,30 +6724,38 @@ class TickerApp:
             if key not in nav:
                 return
             self._settings_page = key
-            for k, (row, bar, lbl) in nav.items():
+            for k, (row, bar, lbl, ico) in nav.items():
                 on = (k == key)
                 row.configure(bg=UI_PANEL2 if on else UI_BG)
                 bar.configure(bg=UI_ACCENT if on else (UI_PANEL2 if on else UI_BG))
                 lbl.configure(bg=UI_PANEL2 if on else UI_BG,
                               fg=UI_FG if on else UI_DIM,
-                              font=(self.ui, 9, "bold" if on else "normal"))
+                              font=(self.ui, 10, "bold" if on else "normal"))
+                ico.configure(bg=UI_PANEL2 if on else UI_BG,
+                              fg=UI_ACCENT if on else UI_FAINT)
             for child in holder.winfo_children():
                 child.destroy()
             builder = getattr(self, f"_settings_{key}", None)
             if builder:
                 builder(holder, fnt)
 
+        # 左侧分类：QQ 的设置那种"图标 + 文字 + 大行距"，一眼能扫到
+        tk.Label(rail, text="", bg=UI_BG, height=1).pack(fill="x")
         for key, label in self.SETTINGS_PAGES:
-            row = tk.Frame(rail, bg=UI_BG, cursor="hand2")
-            row.pack(fill="x", pady=1)
-            bar = tk.Frame(row, bg=UI_BG, width=3, height=26)
+            row = tk.Frame(rail, bg=UI_BG, cursor="hand2", height=36)
+            row.pack(fill="x", pady=2, padx=(8, 8))
+            row.pack_propagate(False)
+            bar = tk.Frame(row, bg=UI_BG, width=3)
             bar.pack(side="left", fill="y")
             bar.pack_propagate(False)
+            ico = tk.Label(row, text=self.SETTINGS_ICONS.get(key, "·"), bg=UI_BG,
+                           fg=UI_FAINT, font=(self.ui, 11), width=3)
+            ico.pack(side="left", fill="y")
             lbl = tk.Label(row, text=label, bg=UI_BG, fg=UI_DIM, font=fnt,
-                           anchor="w", padx=11)
+                           anchor="w", padx=2)
             lbl.pack(side="left", fill="both", expand=True)
-            nav[key] = (row, bar, lbl)
-            for wdg in (row, lbl):
+            nav[key] = (row, bar, lbl, ico)
+            for wdg in (row, lbl, ico):
                 wdg.bind("<Button-1>", lambda _e, k=key: select(k))
 
         select(page if page in nav else "display")
@@ -6864,6 +6944,48 @@ class TickerApp:
             ui_button(box, text, cmd, kind="ghost", font=fnt, padx=14, pady=5).pack(
                 anchor="w", pady=(0, 6))
 
+    # ---- 美股 / 贵金属 / 原油（币安 TradFi 合约，窗口里也能盯） ----------
+    # 用户要求：「窗口监控的时候，希望能监控到美股……股票、贵金属都要，
+    # 币安所有的合约都要」。行情条**抓价这条链本来就能吃 TradFi**
+    # （fetch_binance 用的是同一个 fapi 接口，XAU/TSLA/AAPL/CL 都取得到），
+    # 缺的只是「选择品种」里没有入口 —— 所以这里补上分组入口。
+    TRADFI_CATS = (("股票", ("股票",)),
+                   ("贵金属", ("黄金", "白银")),
+                   ("原油·商品", ("商品",)),
+                   ("指数·其他", ("指数", "TradFi")))
+
+    def _tradfi_top(self, cat, n=10):
+        """某个 TradFi 分类里按 24h 成交额取前 n（给榜单展开用）。"""
+        cats = dict(self.TRADFI_CATS).get(cat, ())
+        rows = [r for r in (self._tradfi_rows or []) if r.get("cat") in cats]
+        rows.sort(key=lambda r: -(r.get("volume") or 0))
+        return [{"base": r.get("base"), "change": r.get("change"),
+                 "price": r.get("price"), "cat": r.get("cat")}
+                for r in rows[:n]]
+
+    def _kick_tradfi(self, on_done=None):
+        """后台备好 TradFi 名单（复用全品种缓存，不额外打接口）。"""
+        if self._tradfi_rows or self._tradfi_loading:
+            return
+        self._tradfi_loading = True
+
+        def work():
+            try:
+                rows = load_all_symbols()
+                self._tradfi_rows = [r for r in rows if r.get("kind") == "tradfi"]
+                cats = {}
+                for r in self._tradfi_rows:
+                    cats[r.get("cat")] = cats.get(r.get("cat"), 0) + 1
+                log(f"TradFi 名单就绪：{len(self._tradfi_rows)} 个 {cats}")
+            except Exception as exc:
+                log(f"TradFi 名单抓取失败: {exc}")
+            finally:
+                self._tradfi_loading = False
+                if on_done:
+                    self._ui_call(on_done)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def open_symbols(self):
         """品种选择器：增删排序自选币种，保存后立即生效。"""
         win = getattr(self, "_sym_win", None)
@@ -6978,10 +7100,33 @@ class TickerApp:
             """
             for child in board.winfo_children():
                 child.destroy()
+            # 重建 = 旧控件全没了：先把旧的定时刷新任务取消掉
+            _c = getattr(self, "_pick_cancel", None)
+            if callable(_c):
+                try:
+                    _c()
+                except Exception:
+                    pass
+            self._pick_cancel = None
             self._board_panels = {}
             self._board_open = None
             self._pick_box = None
             self._pick_items = None
+            # 顺手把 TradFi（股票/贵金属/原油）名单准备好；好了会再回调本函数一次
+            if not self._tradfi_rows:
+                def _tradfi_ready():
+                    """名单抓好了就重摆榜单。
+
+                    ⚠️ 但**正展开着一组**就先别动 —— 重建会把用户刚点开的那份
+                    列表连控件一起销毁（实测会让「列表突然自己收起」，
+                    点在那儿还会 TclError）。记一笔，等收起了再摆。
+                    """
+                    if getattr(self, "_board_open", None):
+                        self._board_stale = True
+                        return
+                    build_board()
+
+                self._kick_tradfi(on_done=_tradfi_ready)
             overview = getattr(self, "_market_overview", None) or {}
             flip = str(self.cfg.get("scheme", "west")).lower() == "cn"
             up, down = (UP_CN, DOWN_CN) if flip else (UP_WEST, DOWN_WEST)
@@ -7018,6 +7163,35 @@ class TickerApp:
                 }
                 row.bind("<Button-1>",
                          lambda e, k=key: self._toggle_board_group(k))
+
+            # ---- 美股 · 贵金属 · 原油（币安 TradFi 合约）----
+            # 形态和上面几组一样：点标题原地展开，组内再用胶囊切成
+            # 股票 / 贵金属 / 原油·商品 / 指数·其他 —— 这样高度只占一组，
+            # 不会把下面的自选列表和按钮挤出窗口（那个坑踩过，见 §7 坑 38）。
+            if self._tradfi_rows:
+                cont2 = tk.Frame(board, bg=UI_BG)
+                cont2.pack(fill="x")
+                row2 = tk.Label(
+                    cont2, text="美股 · 贵金属 · 原油  ▾", anchor="w",
+                    bg=UI_PANEL, fg=UI_FG, font=(self.ui, 9),
+                    padx=10, pady=3, cursor="hand2", bd=0,
+                )
+                row2.pack(fill="x", pady=1)
+                row2.bind("<Enter>", lambda e, w=row2: w.configure(bg=UI_HOVER))
+                row2.bind("<Leave>", lambda e, w=row2: w.configure(bg=UI_PANEL))
+                body2 = tk.Frame(cont2, bg=UI_BG)
+                self._board_panels["__tradfi__"] = {
+                    "row": row2, "body": body2,
+                    "label": "美股 · 贵金属 · 原油", "tone": None,
+                    "items": self._tradfi_top(self._tradfi_cat),
+                    "open": False, "cats": True,
+                }
+                row2.bind("<Button-1>",
+                          lambda e: self._toggle_board_group("__tradfi__"))
+
+            # 记住重建入口：TradFi 名单是后台抓的，抓好了要再摆一次榜；
+            # 测试也用它（否则只能关掉对话框重开）。
+            self._board_rebuild = build_board
 
         def start_universe_load():
             if not getattr(self, "_market_overview", None) and \

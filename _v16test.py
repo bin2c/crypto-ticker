@@ -405,6 +405,50 @@ def main():
         check("→ 右下角有「全品种扫盘」入口", len(scan_btns) >= 1,
               f"{len(scan_btns)} 个: {[str(w.cget('text')) for w in scan_btns]}")
 
+        # ★ 窗口也要能盯美股/贵金属（用户明确要的）：选择器里得有 TradFi 分组，
+        #   组内用分类胶囊切成 股票/贵金属/原油·商品/指数·其他。
+        app._tradfi_rows = [
+            {"base": "TSLA", "change": 0.81, "cat": "股票", "volume": 9e8},
+            {"base": "AAPL", "change": 0.64, "cat": "股票", "volume": 5e8},
+            {"base": "XAU", "change": 0.21, "cat": "黄金", "volume": 9e8},
+            {"base": "XAG", "change": 0.69, "cat": "白银", "volume": 1e8},
+            {"base": "CL", "change": 0.51, "cat": "商品", "volume": 6e8},
+            {"base": "BTCDOM", "change": 0.0, "cat": "指数", "volume": 1e6},
+        ]
+        rebuild = getattr(app, "_board_rebuild", None)
+        check("→ 榜单有重建入口（TradFi 抓完要能补摆）", callable(rebuild))
+        if callable(rebuild):
+            rebuild()
+            pump(300)
+        check("★ 榜单里有「美股 · 贵金属 · 原油」分组",
+              "__tradfi__" in (app._board_panels or {}),
+              str(list((app._board_panels or {}).keys())))
+        app._toggle_board_group("__tradfi__")
+        pump(400)
+        picked = [i.get("base") for i in (app._pick_items or [])]
+        check("★ 默认分类「股票」排在前面的是美股", picked[:2] == ["TSLA", "AAPL"],
+              str(picked))
+        texts = [str(w.cget("text")) for w in all_widgets(app._sym_win)
+                 if isinstance(w, tk.Label)]
+        check("★ 四个分类胶囊都在",
+              all(c in texts for c in ("股票", "贵金属", "原油·商品", "指数·其他")),
+              str([t for t in texts if t in ("股票", "贵金属", "原油·商品", "指数·其他")]))
+        check("★ 贵金属分类出 XAU/XAG（黄金 + 白银都算）",
+              [i.get("base") for i in app._tradfi_top("贵金属")] == ["XAU", "XAG"],
+              str([i.get("base") for i in app._tradfi_top("贵金属")]))
+        check("★ 原油·商品分类里有 CL",
+              "CL" in [i.get("base") for i in app._tradfi_top("原油·商品")])
+        app._sym_add(["TSLA"])
+        pump(200)
+        check("★ 点一项能进自选列表（能保存进窗口）",
+              "TSLA" in (app._sym_items() or []), str(app._sym_items()))
+        check("★ 加了 TradFi 之后底部按钮仍在窗口内",
+              all(0 <= b.winfo_rooty() - win.winfo_rooty() <= win.winfo_height()
+                  for b in scan_btns),
+              str([(str(b.cget("text")), b.winfo_rooty() - win.winfo_rooty())
+                   for b in scan_btns]))
+        app._close_pick_list()
+
         # ★ 回归：某组榜单**展开时**，底部按钮不许被挤出窗口（踩过：466 高度时
         #   「保存并应用」直接跑到窗口外面看不见了）
         win.update_idletasks()
