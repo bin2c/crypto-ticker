@@ -4479,37 +4479,46 @@ class TickerApp:
         mid = self._tape_h / 2
         total = sum(f.measure(t) for t, _c, _b in segs) or 1
         self._tape_period = total
-        reps = int(width / total) + 2
-        want = reps * len(segs)
-        # ⚠️ 重建条件必须包含 **reps（也就是控件宽度）**！
-        #    只比字体和文字的话，窗口一变宽就不会补建对象，
-        #    结果是"滚动条右半边永远是空的"（用户报过"不能正常显示"）。
-        #    颜色/字体/条数变了才需要重建对象；单纯文字变了只改字。
-        sig = (font, len(segs), tuple(c for _t, c, _b in segs), reps)
-        if sig != self._tape_sig or len(self._tape_items) != want:
+        # 字体或颜色集合变了，对象池就得重建（文字变了不用，下面只改字）
+        sig = (font, len(segs), tuple(c for _t, c, _b in segs))
+        # ⚠️ 摆法必须用**老算法：从 -offset 开始从左往右一路铺到超过宽度**。
+        #    我先前试过"按内容周期 rep*total 摆一批对象"，那在
+        #    「内容周期(1237px) >> 窗口宽(305px)」时，对象大部分时间落在屏幕外，
+        #    用户看到的就是"滚动条不能正常显示 / 时有时无"。
+        #    但老算法每帧 delete("all") 重建 = 闪。所以：**摆法照旧，对象复用**。
+        if sig != self._tape_sig:
             cv.delete("all")
             self._tape_items = []
-            for rep in range(reps):
-                for si, (text, color, base) in enumerate(segs):
+            self._tape_texts = []
+            self._tape_sig = sig
+        x = -self._tape_offset
+        used = 0
+        guard = 0
+        hits = []
+        while x < width and guard < 500:
+            for text, color, base in segs:
+                if x > width:
+                    break
+                if used < len(self._tape_items):
+                    it = self._tape_items[used]
+                    if self._tape_texts[used] != (text, color):
+                        cv.itemconfigure(it, text=text, fill=color)
+                        self._tape_texts[used] = (text, color)
+                else:                      # 对象不够才新建（宽度变大时会走到这里）
                     it = cv.create_text(0, mid, text=text, anchor="w",
                                         font=font, fill=color)
-                    self._tape_items.append([it, rep, f.measure(text), base, si, text])
-            self._tape_sig = sig
-        else:
-            # 价格数字变了：只把改过的那几条 itemconfigure，不重建对象
-            for entry in self._tape_items:
-                _it, _rep, _w, _base, si, last = entry
-                text = segs[si][0]
-                if text != last:
-                    entry[5] = text
-                    cv.itemconfigure(entry[0], text=text)
-        off = self._tape_offset % total
-        hits = []
-        for it, rep, seg_w, base, _si, _t in self._tape_items:
-            x = rep * total - off
-            cv.coords(it, x, mid)
-            if base and -seg_w < x < width:
-                hits.append((x, x + seg_w, base))
+                    self._tape_items.append(it)
+                    self._tape_texts.append((text, color))
+                cv.coords(it, x, mid)
+                w = f.measure(text)
+                if base:
+                    hits.append((x, x + w, base))
+                x += w
+                used += 1
+            guard += 1
+        # 用不完的对象挪到屏幕外**藏起来**（绝不销毁 —— 销毁就又闪了）
+        for it in self._tape_items[used:]:
+            cv.coords(it, -10000, mid)
         self._tape_hits = hits
 
     def _on_tape_press(self, event):
