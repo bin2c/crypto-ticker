@@ -2723,6 +2723,18 @@ class _ChartHandler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        try:
+            self._do_GET()
+        except Exception:
+            # 同样的原因：--noconsole 的 exe 没有 stderr，异常必须自己落盘
+            log("图表请求失败:\n" + traceback.format_exc())
+            try:
+                self._send("text/plain; charset=utf-8",
+                           ("服务端出错: " + traceback.format_exc()).encode("utf-8"), 500)
+            except Exception:
+                pass
+
+    def _do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
 
@@ -3169,15 +3181,45 @@ class ChartServer:
             # 端口传 0 让系统分配，避免和别人撞端口
             self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
             self._httpd.daemon_threads = True
+            # ⚠️ 打包成 --noconsole 的 exe 后 **stderr 是空的**，
+            #    默认的 handle_error() 把异常打到 stderr 就等于**静默吞掉**：
+            #    表现为"端口在监听、请求却永远不回"（客户端一直等到超时）。
+            #    所以自己接管，把 traceback 写进日志文件。
+            def _handle_error(request, client_address):
+                log("图表服务处理请求出错:\n" + traceback.format_exc())
+            self._httpd.handle_error = _handle_error
             self.port = self._httpd.server_address[1]
             threading.Thread(target=self._httpd.serve_forever,
                              daemon=True).start()
+            # 打包后排查用：设了 TICKER_SELFTEST=1 就从**进程内部**请求一次自己。
+            # 这一步能把"HTTP 线程没干活"和"外部（防火墙/代理）被挡"分开。
+            if os.environ.get("TICKER_SELFTEST"):
+                threading.Thread(target=self._selftest, daemon=True).start()
             log(f"图表页已就绪: {self.url}")
             return self.port
         except Exception as exc:
             log(f"图表页启动失败: {exc}")
             self._httpd = None
             return 0
+
+    def _selftest(self):
+        """进程内自请求（只在 TICKER_SELFTEST=1 时跑，正常使用不受影响）。"""
+        try:
+            log(f"[selftest] 线程起来了，环境变量={os.environ.get('TICKER_SELFTEST')!r}")
+            import urllib.request
+            time.sleep(4)
+            log(f"[selftest] 开始请求 {self.url}")
+            for path in ("lib/lightweight-charts.js", "", "scan"):
+                try:
+                    with urllib.request.urlopen(self.url + path, timeout=10) as resp:
+                        data = resp.read()
+                    log(f"[selftest] /{path} -> 成功 {len(data)} 字节")
+                except Exception as exc:
+                    log(f"[selftest] /{path} -> 失败 {exc!r}")
+        except Exception:
+            # ⚠️ --noconsole 的 exe **没有 stderr**：线程里的异常会被静默吞掉，
+            #    所以排查期必须自己写进日志文件，不然只能看到"什么都没发生"。
+            log("[selftest] 线程崩了:\n" + traceback.format_exc())
 
     def stop(self):
         if self._httpd is not None:
@@ -3914,7 +3956,17 @@ class TickerApp:
             round_rect(cv, 0, 0, rw, rh, 11, fill=card_bg, outline="")
 
         # 文字效果：细描边最耐看，粗描边只在背景极花时用
-        ring = EFFECT_OFFSETS.get(str(cfg.get("text_effect", "outline")), EFFECT_OFFSETS["outline"])
+        ring = EFFECT_OFFSETS.get(str(cfg.get("text_effect", "outline")))
+        if not isinstance(ring, (list, tuple)):
+            # ⚠️ 打包成 exe 后这里真的拿到过**字符串**（于是 put() 里
+            #    `for dx, dy in ring` 逐字符解包 → ValueError: not enough values
+            #    to unpack (expected 2, got 1) → 第一次渲染就崩、进程退出，
+            #    表现却是"端口在监听、图表页永远不回" —— 查了很久。
+            #    与其猜（exe 里没有 stderr，异常还会被吞），不如就地兜住 + 记下来。
+            log(f"文字效果 {cfg.get('text_effect')!r} 的偏移量异常：{ring!r}，改用细描边")
+            ring = EFFECT_OFFSETS["outline"]
+        ring = [p for p in ring
+                if isinstance(p, (list, tuple)) and len(p) == 2]
 
         def put(x, y, text, font, fill, anchor):
             if float_mode:
@@ -3989,12 +4041,17 @@ class TickerApp:
             # 点了（单击）弹设置窗，可以改价位、改方向、删掉。
             if lev_w:
                 info = self.level_of(base)
-                ring = info[2] if info else pal["dim"]
+                # ⚠️ 变量名别叫 ring！上面 `ring` 是**文字描边偏移量**，
+                #    put() 闭包要用它；这里覆盖成颜色字符串之后，
+                #    纯文字(float)模式下 put() 会拿颜色去逐字符解包 →
+                #    ValueError: not enough values to unpack (expected 2, got 1)
+                #    → 第一次渲染就崩（默认配置就是 float，所以打包出来的 exe 一启动就死）。
+                ring_col = info[2] if info else pal["dim"]
                 bx = lev_left + LEV_BTN_W / 2.0
                 cv.create_oval(bx - 3.4, cy - 3.4, bx + 3.4, cy + 3.4,
-                               outline=ring, width=1)
+                               outline=ring_col, width=1)
                 cv.create_oval(bx - 1.0, cy - 1.0, bx + 1.0, cy + 1.0,
-                               fill=ring, outline="")
+                               fill=ring_col, outline="")
                 hit_right = lev_left + LEV_BTN_W + 2
                 if info:
                     put(lev_left + LEV_BTN_W + 3, cy, info[3], f_tag, info[2], "w")
@@ -7314,8 +7371,20 @@ def main(argv=None):
 
     enable_dpi_awareness()
     app = TickerApp(cfg)
-    app.render()
-    app.root.mainloop()
+    try:
+        app.render()
+    except Exception:
+        # ⚠️ 打包成 --noconsole 的 exe 后 **没有 stderr**：
+        #    启动时第一次渲染如果抛异常，进程会**直接退出**，
+        #    留下一个"端口在监听、图表页永远不回"的假象（查了很久才定位）。
+        #    所以这里必须自己把 traceback 写进日志，而且要**继续跑**：
+        #    行情条是常用工具，一次渲染失败不该让它整个死掉。
+        log("启动首次渲染失败（已继续运行）:\n" + traceback.format_exc())
+    try:
+        app.root.mainloop()
+    except Exception:
+        log("主循环异常退出:\n" + traceback.format_exc())
+        return 1
     return 0
 
 
