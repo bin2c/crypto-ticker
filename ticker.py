@@ -3262,6 +3262,8 @@ class TickerApp:
         self._hotkey_map = {}
         self._hotkey_labels = {}
         self._symbol_universe = None       # 永续合约清单（后台预热）
+        self._match_universe = None        # 输入框模糊匹配名单（加密 + TradFi）
+        self._match_loading = False
         self._market_overview = None       # 榜单数据
         self._symbols_loading = False
         self._flash = {}                   # (base,quote) -> (方向, 起始时间)
@@ -4594,13 +4596,45 @@ class TickerApp:
 
     CAND_MAX = 9
 
+    def _match_list(self):
+        """输入框模糊匹配用的名单：**加密 + TradFi（美股/贵金属/原油/指数）**。
+
+        ⚠️ 不能直接用 `self._symbol_universe` —— 那是**榜单用**的名单，
+        `_overview_binance()` 里**故意排除了 TradFi**（免得加密排行榜里混进特斯拉）。
+        用户问过"你的模糊匹配是不是还没把贵金属和美股加上"，答：确实没加，这里补。
+
+        冷启动时 `load_all_symbols()` 要联网，所以**先返回加密名单、后台补齐**，
+        绝不卡住输入（每敲一个字母都在这个函数上）。
+        """
+        cached = getattr(self, "_match_universe", None)
+        if cached:
+            return cached
+        base = list(getattr(self, "_symbol_universe", None) or FALLBACK_SYMBOLS)
+        if not getattr(self, "_match_loading", False):
+            self._match_loading = True
+            crypto = list(base)
+
+            def work():
+                try:
+                    names = match_universe(crypto)
+                    self._match_universe = names
+                    trad = [n for n in names if n not in set(crypto)]
+                    log(f"模糊匹配名单就绪：{len(names)} 个（含 TradFi {len(trad)} 个）")
+                except Exception as exc:
+                    log(f"模糊匹配名单加载失败: {exc}")
+                finally:
+                    self._match_loading = False
+
+            threading.Thread(target=work, daemon=True).start()
+        return base
+
     def _candidate_hits(self):
         if self._placeholder_on():
             return []
         text = self.entry.get().strip()
         if not text:
             return []
-        universe = getattr(self, "_symbol_universe", None) or FALLBACK_SYMBOLS
+        universe = self._match_list()
         return match_symbols(text, universe, limit=self.CAND_MAX)
 
     def _ensure_cand_window(self):
