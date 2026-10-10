@@ -1,0 +1,36 @@
+# ⚠️ gitignore 不支持行尾注释！注释必须单独一行，
+#    否则整行会被当成一个"文件名模式"，等于什么都没忽略（踩过）。
+
+# ---- 含隐私/本机数据，绝对不能进仓库 ----
+config.json
+symbols.json
+*.log
+ticker.log
+
+# ---- 打包产物 ----
+build/
+dist/
+*.exe
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 测试临时产物 ----
+_p.js
+_page*.js
+_charturl.txt
+_v16test_out.txt
+_lockhold.txt
+_shot_*.png
+_full_*.png
+_crop_*.png
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+_p_*.js
