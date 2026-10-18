@@ -34,3 +34,10 @@ _crop_*.png
 Thumbs.db
 desktop.ini
 _p_*.js
+
+# ---- 临时调试产物（截图/探针脚本）----
+_*.png
+_*.py
+_*.ps1
+_*.json
+!_p_*.json

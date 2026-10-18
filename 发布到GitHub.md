@@ -28,7 +28,7 @@ cd G:\mydeepseek\crypto-ticker
 git init
 git add .
 git status --short          # 再确认一眼：没有 config.json / ticker.log
-git commit -m "行情条 v0.19：透明悬浮行情窗 + 全品种扫盘 + 趋势线 + 主题皮肤"
+git commit -m "行情条 v0.22：缩放重做 + 重置视图 + 任务栏显示 + 全品种扫盘 + 趋势线 + 主题皮肤"
 ```
 
 ## 2. 在 GitHub 上建一个空仓库

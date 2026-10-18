@@ -7,7 +7,8 @@
 
 常用操作
     左键拖动     移动窗口
-    右键         打开菜单（刷新 / 置顶 / 不透明度 / 样式 / 币种 / 退出）
+    拖窗口边缘   缩放（字号跟着变，窗口按内容自适应；Esc 撤销这次缩放）
+    右键         打开菜单（重置视图 / 刷新 / 游戏模式 / 不透明度 / 币种 / 退出）
     滚轮         调整不透明度
     Ctrl + 滚轮  调整字号
 
@@ -17,6 +18,8 @@
     python ticker.py --symbols BTC --style float --alpha 1.0 --scheme cn
 
 配置保存在同目录 config.json（首次运行自动生成，右键菜单"重新加载配置"可热更新）。
+窗口调乱了（拖太大/拖太小/被拖到屏幕外）：右键 →「重置回原来的视图」，
+字号回到默认 9、位置回到右上角。
 """
 
 from __future__ import annotations
@@ -76,7 +79,7 @@ def _resolve_dirs():
 
 
 APP_DIR, RES_DIR = _resolve_dirs()   # APP_DIR=可写（配置/日志/缓存）  RES_DIR=只读资源
-APP_VERSION = "0.19"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
+APP_VERSION = "0.36"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 # ---------------------------------------------------------------- 默认配置 --
@@ -88,7 +91,7 @@ DEFAULT_CONFIG = {
     "tv_exchange": "BINANCE",           # 双击打开 TradingView 时用的交易所前缀
     "interval": 3,                      # 刷新间隔（秒）
     "alpha": 1.0,                       # 整窗不透明度 0.2 ~ 1.0
-    "style": "float",                   # float=纯文字全透明（默认）  card=半透明卡片
+    "style": "card",                    # card=纯色卡片（默认，实底） float=纯文字全透明 blur=毛玻璃
     "scheme": "west",                   # west=绿涨红跌  cn=红涨绿跌
     "font_size": 9,                     # 小字号，不明显挡视线
     "font_family": "Bahnschrift SemiLight",   # 简洁的 DIN 风无衬线，专为数字设计
@@ -100,11 +103,15 @@ DEFAULT_CONFIG = {
     "show_tape": True,                  # 顶部横向滚动条（涨幅/跌幅/成交量）
     "show_input": True,                 # 底部内联输入框（模糊匹配加币）
     "dblclick_chart": True,             # 双击行情行打开 TradingView（拖动窗口不会误触）
+    "tv_link": True,                    # 点品种/扫盘↑↓ 时直接切用户自己的 TradingView（需装 tv-ext 扩展）
+    "float_pos": [],                    # 悬浮扫盘条位置 [x, y]（拖动后自动保存）
+    "float_sel": "",                    # 悬浮扫盘条上次停在哪个品种
     "market_cap_filter": 20,            # 成交量榜剔除市值前 N 名（0=不剔除）
     "rank_refresh": 60,                 # 榜单与滚动条刷新间隔（秒）
     "show_oi": True,                    # 是否显示增仓榜（只看持仓增加的）
     "oi_refresh": 600,                  # 增仓榜刷新间隔（秒，逐个币查所以慢）
     "click_through": False,             # True=整个窗口鼠标穿透，完全不挡点击
+    "show_in_taskbar": True,            # True=任务栏/Alt+Tab 里能看到它（见 apply_taskbar）
     "hotkeys": True,                    # 全局热键 Ctrl+Alt+H/M/P
     "always_on_top": True,
     "title": "行情",
@@ -120,7 +127,14 @@ BG_DARK = "#0b0e11"
 BG_BORDER = "#2b3139"
 UP_WEST, DOWN_WEST = "#0ecb81", "#f6465d"
 UP_CN, DOWN_CN = "#f6465d", "#0ecb81"
-TRANSPARENT_KEY = "#ff00fe"          # 透明色键（正常画面里不会出现的洋红）
+TRANSPARENT_KEY = "#04070a"          # 兜底色键（打包/异常时用）；正常运行走 _key_color()
+# ★ 色键怎么选：Windows 的 `-transparentcolor` 是把**等于这个颜色的像素**抠成透明。
+#   文字是抗锯齿画的，边缘像素 = 字色和"画布底色"按覆盖率混合出来的中间色。
+#   所以底色（色键）必须和文字**同一色系**：
+#     · 黑字（浅色桌面）→ 色键取白，边缘往白里混，抠掉之后就是自然的羽化边；
+#     · 白字（深色桌面）→ 色键取接近黑，同理。
+#   以前固定写洋红 #ff00fe：黑字往洋红里混 → 整行字被染成亮粉/青色，
+#   用户看到的就是"字体和样式全乱了、CSS 没加载"（v0.32 修）。
 LIGHT_TINT = "#f2f4f7"               # 白天主题：毛玻璃底色（浅灰白，比纯白柔和）
 LIGHT_CARD = "#ffffff"               # 白天主题：纯色卡片底
 
@@ -444,6 +458,14 @@ LEVEL_WATCH = "#f0b90b"              # 仅关注（琥珀，和提醒点亮同�
 OPACITY_STEPS = (100, 95, 90, 85, 80, 75, 70, 60, 50, 40, 30)
 FONT_SIZE_STEPS = (7, 8, 9, 10, 11, 12, 14, 16)
 
+# ★ 字号上下限是**唯一真相**：菜单、Ctrl+滚轮、滚轮缩放、拖边缩放全走这一对常量。
+#   以前拖边用的是 min=7/max=24、菜单用的是 min=8/max=28，两套边界不一样 ——
+#   拖到 7 之后菜单再也回不去 7，拖到 24 之后菜单又能设成 28，
+#   表现就是"调着调着就调不回去了"。现在只留一套。
+FONT_SIZE_MIN = 7
+FONT_SIZE_MAX = 28
+FONT_SIZE_DEFAULT = int(DEFAULT_CONFIG.get("font_size", 9))   # 9：出厂默认，重置用
+
 # ---- Windows 扩展样式：让整窗鼠标穿透（打游戏时完全不挡点击）----
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
@@ -495,11 +517,17 @@ HOTKEY_DEFS = {
     # 全品种扫盘页
     "scan": [("Ctrl+Alt+S", _C | _A, 0x53),
              ("Ctrl+Shift+Alt+S", _C | _A | _S, 0x53)],
+    # 悬浮扫盘条：TV 在前台按着它 ↑↓ 一路切，不用切窗口
+    "float": [("Ctrl+Alt+F", _C | _A, 0x46),
+              ("Ctrl+Alt+D", _C | _A, 0x44),
+              ("Ctrl+Shift+Alt+F", _C | _A | _S, 0x46)],
 }
 HOTKEY_NAMES = {"toggle": "显隐", "menu": "菜单", "click": "穿透",
-                "symbols": "选品种", "game": "游戏模式", "scan": "全品种扫盘"}
+                "symbols": "选品种", "game": "游戏模式", "scan": "全品种扫盘",
+                "float": "悬浮扫盘条"}
 DEFAULT_HOTKEY_HINT = ("热键：Ctrl+Alt+H 显隐 · Ctrl+Alt+M 菜单 · "
-                       "Ctrl+Alt+P 穿透 · Ctrl+Alt+G 游戏模式 · Ctrl+Alt+S 全品种扫盘")
+                       "Ctrl+Alt+P 穿透 · Ctrl+Alt+G 游戏模式 · Ctrl+Alt+S 全品种扫盘 · "
+                       "Ctrl+Alt+F 悬浮扫盘条")
 
 
 def log(msg: str) -> None:
@@ -532,6 +560,18 @@ def load_config() -> dict:
                 cfg.update(json.load(fh) or {})
         except Exception as exc:
             log(f"读取配置失败，使用默认值: {exc}")
+    # ★ v0.33 一次性迁移：老配置里记着 style=float（纯文字全透明）。
+    #   色键透明的像素在 Windows 上是"点不到的"，整窗只有字形能接事件，
+    #   于是拖不动、点不着、看着像桌面上的散字。默认改成实底的 card。
+    #   只迁移一次；以后用户自己在菜单里选回纯文字，不再动他的选择。
+    if not cfg.get("style_migrated_v33"):
+        migrated = str(cfg.get("style", "")).strip().lower() == "float"
+        if migrated:
+            cfg["style"] = "card"
+            log("外观从「纯文字全透明」迁移为「纯色卡片」（v0.33：透明底点不到，拖不动）")
+        cfg["style_migrated_v33"] = True
+        if migrated:
+            save_config(cfg)         # 落盘：不然下次启动又迁移一遍，日志里一直刷
     return cfg
 
 
@@ -576,6 +616,18 @@ def tradingview_symbol(base: str, quote: str, market: str = "perp",
     if str(market).lower() == "perp":
         symbol += ".P"
     return f"{exchange}:{symbol}"
+
+
+# 币安有几个合约品种名是汉字，TradingView 上登记的是拼音代码。
+# 直接拼 BINANCE:哈基米USDT.P 是无效符号，setSymbol 会静默失败 ——
+# 所以先查这张表，表里没有的再去搜（见 tradingview_resolve）。
+TV_CN_ALIAS = {
+    "龙虾": "LONGXIA",
+    "牛来": "NIULAI",
+    "币安人生": "BIANRENSHENG",
+    "哈基米": "HAJIMI",
+    "我踏马来了": "WOTAMALAILIAO",
+}
 
 
 def tradingview_url(base: str, quote: str, market: str = "perp",
@@ -834,34 +886,36 @@ def fetch_rankings(valid_bases, big_caps=(), timeout=15.0):
 
 
 def fetch_oi_changes(bases, quote="USDT", workers=16, timeout=8.0):
-    """并发抓各币的 4 小时持仓量变化百分比。
+    """并发抓各币的持仓量变化百分比 —— 一次请求同时给出 **4 小时 / 24 小时** 两个窗口。
 
-    用币安自己的 openInterestHist：period=4h & limit=2 正好给出
-    「4 小时前」和「现在」两个点，相除就是变化率。
-    coinalyze 的同类数据要付费 API key，扒不了；币安这个是免 key 的。
+    用币安自己的 openInterestHist：period=1h & limit=25 拿到最近 25 个小时的
+    持仓量，`[-1]` 是现在，`[-5]` 是 4 小时前，`[0]` 是 24 小时前。
+    一次请求两个窗口，省一半配额（之前 4h 用的是 period=4h&limit=2，
+    要再加一个 24h 就得再来一遍 520 次请求）。
+    coinalyze / coinglass 的同类数据要付费 key，扒不了；币安这个是免 key 的。
     """
-    period = OI_PERIOD
-
     def one(base):
         symbol = f"{base}{quote}"
         url = ("https://fapi.binance.com/futures/data/openInterestHist"
-               f"?symbol={symbol}&period={period}&limit=2")
+               f"?symbol={symbol}&period=1h&limit=25")
         try:
             data = _http_json(url, timeout, attempts=2)
         except Exception:
             return None
-        if not isinstance(data, list) or len(data) < 2:
+        if not isinstance(data, list) or len(data) < 5:
             return None
         try:
-            old = float(data[0]["sumOpenInterest"])
-            new = float(data[1]["sumOpenInterest"])
-            value = float(data[1].get("sumOpenInterestValue") or 0.0)
-        except (KeyError, TypeError, ValueError):
+            series = [float(d["sumOpenInterest"]) for d in data]
+            value = float(data[-1].get("sumOpenInterestValue") or 0.0)
+        except (KeyError, TypeError, ValueError, IndexError):
             return None
-        if old <= 0:
+        if series[-5] <= 0 or series[0] <= 0:
             return None
-        return {"base": base, "oi": new, "oiValue": value,
-                "change": (new - old) / old * 100.0}
+        now = series[-1]
+        change = (now - series[-5]) / series[-5] * 100.0            # 近 4 小时
+        change24 = ((now - series[0]) / series[0] * 100.0) if len(series) >= 24 else None
+        return {"base": base, "oi": now, "oiValue": value,
+                "change": change, "change24": change24}
 
     out = []
     try:
@@ -874,7 +928,7 @@ def fetch_oi_changes(bases, quote="USDT", workers=16, timeout=8.0):
     return out
 
 
-def rank_oi(rows, limit=10, min_value=None):
+def rank_oi(rows, limit=10, min_value=None, key="change"):
     """按 4 小时持仓**增加**百分比排序。
 
     只看增加：持仓减少说明在平仓离场，不是新资金进场，没有参考价值。
@@ -885,11 +939,12 @@ def rank_oi(rows, limit=10, min_value=None):
     """
     if min_value is None:
         min_value = OI_MIN_VALUE
-    gainers = [r for r in rows if float(r.get("change") or 0.0) > 0]
+    rows = [r for r in rows if r.get(key) is not None]
+    gainers = [r for r in rows if float(r.get(key) or 0.0) > 0]
     keep = [r for r in gainers if float(r.get("oiValue") or 0.0) >= min_value]
     if len(keep) < limit:
         keep = gainers                      # 放宽名义下限，但仍然只看增仓
-    return sorted(keep, key=lambda r: -float(r.get("change") or 0.0))[:limit]
+    return sorted(keep, key=lambda r: -float(r.get(key) or 0.0))[:limit]
 
 
 # ------------------------------------------------- 全品种（含 TradFi）--
@@ -3248,6 +3303,1611 @@ class ChartServer:
             self._httpd = None
 
 
+# ══════════════════════════════════════════════════════════════════
+# TradingView 联动：把「现在该看哪个品种」广播给本地浏览器扩展
+#
+# 为什么拆成「广播 + 扩展」两半：
+#   TradingView 页面内部有 setSymbol（实测 `window._exposed_chartWidgetCollection
+#   .setSymbol("BINANCE:ETHUSDT.P")`），能在**不刷新页面、不丢画线、不丢布局**
+#   的情况下原地换品种。但它是页面自己的 JS，外部只有走调试端口才能调用，
+#   而那要改 Chrome 启动参数（普通双击打开的 Chrome 没有端口）。
+#   所以：ticker 这边只开一个固定端口的本地小接口负责广播状态，
+#   tv-ext/ 那个小扩展轮询它，再用 scripting 把 setSymbol 注入
+#   **用户自己已经登录的那个 TV 标签页**。既不用改浏览器配置，也不多开标签。
+# ══════════════════════════════════════════════════════════════════
+
+# 固定端口段（扩展按同样的顺序找）。范围小是为了扩展能一口气探完。
+TV_BRIDGE_PORTS = tuple(range(17653, 17663))
+
+
+class _BridgeServer(ThreadingHTTPServer):
+    """Windows 上 SO_REUSEADDR 不是"复用"而是"抢占"：两个实例都 bind 同一个口，
+    后来者把前者的连接抢走，扩展就会一会儿连这个一会儿连那个。
+    这里关掉它，端口被占就老老实实 OSError → 换下一个端口。"""
+
+    allow_reuse_address = False
+    daemon_threads = True
+
+
+class _TVBridgeHandler(BaseHTTPRequestHandler):
+    """给浏览器扩展用的两个接口：/ping 探活、/state 长轮询拿最新品种。"""
+
+    bridge = None                       # 由 TVBridge 注入
+
+    def log_message(self, *_args):
+        pass
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Max-Age", "600")
+
+    def _send(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self._cors()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        try:
+            self._do_GET()
+        except Exception:
+            log("TradingView 联动接口出错:\n" + traceback.format_exc())
+
+    def _do_GET(self):
+        bridge = self.bridge
+        if bridge is None:
+            return self._send({"ok": False, "error": "no bridge"}, 503)
+        u = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(u.query)
+        bridge.note_client()
+        if u.path == "/ping":
+            info = bridge.snapshot()
+            info.update({"ok": True, "app": "crypto-ticker"})
+            return self._send(info)
+        if u.path == "/state":
+            try:
+                since = int((query.get("since") or ["-1"])[0])
+            except ValueError:
+                since = -1
+            try:
+                wait = float((query.get("wait") or ["20"])[0])
+            except ValueError:
+                wait = 20.0
+            return self._send(bridge.wait_state(since, max(0.0, min(25.0, wait))))
+        self.send_error(404)
+
+
+class TVBridge:
+    """当前品种的广播站（只监听 127.0.0.1，不对外网开放）。"""
+
+    def __init__(self, app):
+        self.app = app
+        self.port = 0
+        self.seq = 0                    # 每次推送 +1，扩展靠它判断"有没有新东西"
+        self.symbol = ""                # 例如 BINANCE:ETHUSDT.P
+        self.base = ""
+        self.quote = ""
+        self._cond = threading.Condition()
+        self._httpd = None
+        self._last_client = 0.0
+        self._ever_client = False
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.port}/" if self.port else ""
+
+    def start(self):
+        if self._httpd is not None:
+            return self.port
+        handler = type("Handler", (_TVBridgeHandler,), {"bridge": self})
+        for port in TV_BRIDGE_PORTS:
+            try:
+                httpd = _BridgeServer(("127.0.0.1", port), handler)
+            except OSError:
+                continue                # 端口被占：换下一个
+            httpd.daemon_threads = True
+            # 同 ChartServer：--noconsole 下 stderr 是空的，异常必须自己落盘
+            def _handle_error(request, client_address):
+                log("TradingView 联动处理请求出错:\n" + traceback.format_exc())
+            httpd.handle_error = _handle_error
+            self._httpd = httpd
+            self.port = port
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            log(f"TradingView 联动接口已就绪: {self.url}"
+                f"（装了 tv-ext 扩展后，点品种/扫盘 ↑↓ 就会直接切 TV）")
+            return port
+        log("TradingView 联动接口没有可用端口（17653-17662 被别的程序占了），"
+            "扫盘仍可用，但不会联动浏览器")
+        return 0
+
+    def note_client(self):
+        with self._cond:
+            self._last_client = time.time()
+            self._ever_client = True
+
+    def seen_ever(self):
+        """这次启动以来扩展有没有连上过（连过就说明装了，别再多开网页）。"""
+        with self._cond:
+            return bool(getattr(self, "_ever_client", False))
+
+    def online(self, window=8.0):
+        """最近 window 秒内有扩展来问过 → 认为扩展在线。"""
+        with self._cond:
+            return (time.time() - self._last_client) < window
+
+    def snapshot(self):
+        with self._cond:
+            return {"seq": self.seq, "symbol": self.symbol,
+                    "base": self.base, "quote": self.quote,
+                    "port": self.port,
+                    "online": (time.time() - self._last_client) < 8.0}
+
+    def push(self, symbol, base, quote):
+        if not symbol:
+            return False
+        with self._cond:
+            if symbol == self.symbol:
+                return False            # 同一品种重复推送不打扰扩展（切品种时序 +1 只算一次）
+            self.seq += 1
+            self.symbol = symbol
+            self.base = base
+            self.quote = quote
+            self._cond.notify_all()
+            online = (time.time() - self._last_client) < 8.0
+            ever = self._ever_client
+        log(f"TradingView 联动 -> {symbol}")
+        if not (online or ever):
+            log("  ⚠️ 扩展没在线（没装？浏览器没开？），这次只能开网页，别指望原地切换")
+        return True
+
+    def wait_state(self, since, wait):
+        """长轮询：有比 since 新的推送就立刻返回，否则最多等 wait 秒。"""
+        deadline = time.time() + max(0.0, wait)
+        with self._cond:
+            while self.seq <= since:
+                left = deadline - time.time()
+                if left <= 0:
+                    break
+                self._cond.wait(min(left, 1.0))
+            return {"ok": True, "seq": self.seq, "symbol": self.symbol,
+                    "base": self.base, "quote": self.quote,
+                    "online": (time.time() - self._last_client) < 8.0}
+
+
+if ctypes:
+    _WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p,
+                                  ctypes.c_uint, ctypes.c_size_t,
+                                  ctypes.c_ssize_t)
+
+    class _WinMSG(ctypes.Structure):
+        _fields_ = [("hwnd", ctypes.c_void_p), ("message", ctypes.c_uint),
+                    ("wParam", ctypes.c_size_t), ("lParam", ctypes.c_ssize_t),
+                    ("time", ctypes.c_uint),
+                    ("pt_x", ctypes.c_long), ("pt_y", ctypes.c_long)]
+
+    class _WNDCLASSEXW(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("style", ctypes.c_uint),
+                    ("lpfnWndProc", _WNDPROC),
+                    ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", ctypes.c_void_p), ("hIcon", ctypes.c_void_p),
+                    ("hCursor", ctypes.c_void_p),
+                    ("hbrBackground", ctypes.c_void_p),
+                    ("lpszMenuName", ctypes.c_wchar_p),
+                    ("lpszClassName", ctypes.c_wchar_p),
+                    ("hIconSm", ctypes.c_void_p)]
+else:                                   # pragma: no cover - 非 Windows
+    _WNDPROC = _WinMSG = _WNDCLASSEXW = None
+
+
+class _HotkeyGrab:
+    """用 RegisterHotKey 把 ↑↓ 这些键"抢"过来 —— 不管前台是哪个程序。
+
+    为什么需要它：
+      Tk 的 bind 只在前台/有焦点时收得到按键。而用户要看 TradingView，
+      前台只能是 TV —— 于是"按 ↓ 扫盘"就必须要么抢前台（Windows 会拦，
+      实测抢不到），要么全局抓键（本类）。
+
+      抓到的好处很直接：TV 一直留在前台不动，用户按 ↓，小条自己往下走，
+      TV 原地换品种。不闪、不切窗口、不丢图表布局。
+
+    副作用：小条开着的时候，方向键/翻页/Home/End/Esc 被本进程独占，别的
+    程序收不到；关掉小条立刻还回去。
+
+    实现要点（都是踩过的坑）：
+      * 一个常驻的消息线程 + 消息-only 窗口，**整个程序只建一次**。开关
+        小条只是在这同一个窗口上 Register/Unregister，绝不销毁窗口 ——
+        销毁/重建窗口会让热键挂在"已经没人收消息"的窗口上，表现是第二次
+        打开条子按 ↓ 完全没反应。
+      * RegisterHotKey 必须在收消息的那个线程里调用：WM_HOTKEY 是投递给
+        "注册热键的那个线程"的消息队列的。
+      * WM_HOTKEY 不会自动重复，按住只有一下；重复由 ScanFloat 用
+        GetAsyncKeyState 自己补。
+    """
+
+    WM_HOTKEY = 0x0312
+    WM_CLOSE_LOOP = 0x8001       # 让消息线程在自己的线程里收摊
+    WM_GRAB = 0x8002             # 注册这批键
+    WM_RELEASE = 0x8003          # 把这批键还回去
+    VK = {"up": 0x26, "down": 0x28, "pgup": 0x21, "pgdn": 0x22,
+          "home": 0x24, "end": 0x23, "esc": 0x1B}
+
+    def __init__(self, on_key=None):
+        self.on_key = on_key          # 回调：on_key(name)，在消息线程里调用
+        self.ok = False
+        self.got = []
+        self.missed = []
+        self._hwnd = None
+        self._tid = 0
+        self._names = {}              # 热键 id -> 键名
+        self._thread = None
+        self._ready = threading.Event()
+        self._ack = threading.Event()
+        self._wc = None               # 保住 WNDCLASSEXW 引用，别被 GC
+        self._proc = None             # 保住 WNDPROC 引用，被 GC 会崩
+
+    # ---- 对外 ------------------------------------------------------------
+
+    def grab(self, on_key=None):
+        """注册按键。返回是否至少抓到一个。"""
+        if on_key is not None:
+            self.on_key = on_key
+        if not self._ensure_thread():
+            return False
+        if self.ok:
+            return True
+        self._ack.clear()
+        ctypes.windll.user32.PostThreadMessageW(self._tid, self.WM_GRAB, 0, 0)
+        self._ack.wait(1.5)
+        return self.ok
+
+    def release(self):
+        """把按键还给系统（窗口和线程留着，下次还用它）。"""
+        if not self._tid or not self._hwnd:
+            return
+        self._ack.clear()
+        try:
+            ctypes.windll.user32.PostThreadMessageW(self._tid, self.WM_RELEASE, 0, 0)
+            self._ack.wait(1.0)
+        except Exception:
+            pass
+
+    def shutdown(self):
+        if self._tid:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(self._tid,
+                                                        self.WM_CLOSE_LOOP, 0, 0)
+            except Exception:
+                pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(0.6)
+        self._thread = None
+        self._hwnd = None
+        self._tid = 0
+
+    # ---- 内部 ------------------------------------------------------------
+
+    def _ensure_thread(self):
+        if self._thread is not None and self._thread.is_alive():
+            return bool(self._hwnd)
+        if not ctypes:
+            return False
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(2.0)
+        return bool(self._hwnd)
+
+    def _do_grab(self):
+        u = ctypes.windll.user32
+        self.got, self.missed, self._names = [], [], {}
+        hid = 0xB100
+        for name, vk in self.VK.items():
+            if u.RegisterHotKey(self._hwnd, hid, 0, vk):
+                self._names[hid] = name
+                self.got.append(name)
+            else:
+                self.missed.append(name)
+            hid += 1
+        self.ok = bool(self.got)
+
+    def _do_release(self):
+        u = ctypes.windll.user32
+        for hid in list(self._names):
+            u.UnregisterHotKey(self._hwnd, hid)
+        self._names = {}
+        self.ok = False
+        self.got, self.missed = [], []
+
+    def _run(self):
+        try:
+            u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            u.DefWindowProcW.restype = ctypes.c_ssize_t
+            u.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                        ctypes.c_size_t, ctypes.c_ssize_t]
+            self._proc = _WNDPROC(self._wnd_proc)
+            wc = _WNDCLASSEXW()
+            wc.cbSize = ctypes.sizeof(_WNDCLASSEXW)
+            wc.lpfnWndProc = self._proc
+            wc.hInstance = k.GetModuleHandleW(None)
+            wc.lpszClassName = "CryptoTickerScanKeys"
+            self._wc = wc
+            u.RegisterClassExW(ctypes.byref(wc))
+            u.CreateWindowExW.restype = ctypes.c_void_p
+            hwnd = u.CreateWindowExW(0, wc.lpszClassName, "scan-keys", 0,
+                                     0, 0, 0, 0, ctypes.c_void_p(-3),
+                                     None, wc.hInstance, None)
+            if not hwnd:
+                self._ready.set()
+                return
+            self._hwnd = hwnd
+            self._tid = k.GetCurrentThreadId()
+            self._ready.set()
+            msg = _WinMSG()
+            while True:
+                r = u.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if r <= 0:
+                    break
+                m = int(msg.message)
+                if m == self.WM_GRAB:
+                    self._do_grab()
+                    self._ack.set()
+                elif m == self.WM_RELEASE:
+                    self._do_release()
+                    self._ack.set()
+                elif m == self.WM_CLOSE_LOOP:
+                    self._do_release()
+                    u.DestroyWindow(hwnd)
+                    break
+                else:
+                    u.TranslateMessage(ctypes.byref(msg))
+                    u.DispatchMessageW(ctypes.byref(msg))
+        except Exception as exc:
+            self._ready.set()
+        finally:
+            self._ack.set()
+
+    def _wnd_proc(self, hwnd, msg, wparam, lparam):
+        if msg == self.WM_HOTKEY:
+            name = self._names.get(int(wparam))
+            if name and self.on_key:
+                try:
+                    self.on_key(name)
+                except Exception:
+                    pass
+            return 0
+        return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+class ScanFloat:
+    """悬浮扫盘条：贴着屏幕左边的一条细长面板，↑↓ 一路扫，TV 跟着换。
+
+    为什么不做成第二个网页：
+      用户原话是「一直按着方向键，然后它就跟着变，就左边侧边栏这样子的东西」。
+      网页版做不到"按着不放"——焦点在 TV 上时箭头归 TV，焦点在网页上时又看不见图表。
+      所以做成一个**置顶小窗**，并且用 RegisterHotKey（见 `_HotkeyGrab`）把
+      ↑↓/PgUp/PgDn/Home/End 全局抓过来：TradingView 一直留在前台不用切，
+      按住 ↓ 它就一路往下扫，每扫一行往 TVBridge 推一个品种，TradingView
+      那边由 tv-ext 扩展原地换品种（不刷新、不丢画线）。
+
+      关掉小条就把键盘还回去，所以不影响平时用方向键。
+      小窗只有 236px 宽，贴在左边，右边整块屏幕还是你的 TradingView。
+    """
+
+    WIDTH = 264                 # 默认宽度（用户拖过之后按 float_size 来）
+    ROW_H = 40                  # 正常模式每行高度（两行字：名字 + 成交量）
+    COMPACT_W = 176             # 小窗模式宽度：只留名字 + 涨跌幅
+    COMPACT_ROW_H = 24
+    MIN_W, MAX_W = 176, 460
+    MIN_ROWS, MAX_ROWS = 1, 45
+    CHROME = 110                # 正常模式：头 38 + 两排 chip 44 + 脚 24 + 分隔线
+    COMPACT_CHROME = 41         # 小窗模式：只有头 + 一条分隔线
+    # 榜单模式：全部（A→Z）/ 量高 / 量低 / 涨幅 / 跌幅 / 增仓
+    # 前五个都是**全量排序**（不截前十）—— 榜单前十那种一屏就十行，扫不动
+    MODES = [("all", "全部"), ("vol", "量高"), ("vol_asc", "量低"),
+             ("gain", "涨幅"), ("loss", "跌幅"), ("oi4", "4H"),
+             ("oi24", "24H")]
+    # 分类筛选：跟扫盘页的 SCAN_CATS 对齐（cat 字段由 fetch_all_symbols 填）
+    # 第一排是收藏 —— 自选装不下的时候，拿它当小观察列表
+    CATS = [("all", "全部"), ("fav", "收藏"), ("crypto", "加密"),
+            ("股票", "股票"), ("黄金", "贵金属"), ("商品", "商品"),
+            ("tradfi", "其他")]
+
+    def __init__(self, app):
+        self.app = app
+        self.rows = []              # 全品种（A→Z），load_all_symbols() 的缓存
+        self.sel = 0                # 当前选中行（在 self.rows 里的下标）
+        self.off = 0                # 当前页第一行
+        self.n = 0                  # 一屏几行（按屏幕高度算）
+        self._load_running = False
+        self._load_ts = 0.0
+        self._drag = None
+        self._labels = []
+        self._pressing = False
+        self._pending = 0           # 名单还没到就按了键，先把步数记着
+        self._closing = False
+        self.base_rows = []         # 全品种原始行（筛分类 / 排榜单都在它上面做）
+        self.favs = set()           # 收藏（大写 base），跟扫盘页的 ♥ 是同一份数据
+        self.mode = str(app.cfg.get("float_mode") or "all")
+        if self.mode not in dict(self.MODES):
+            self.mode = "all"
+        self.cat = str(app.cfg.get("float_cat") or "all")
+        if self.cat not in dict(self.CATS):
+            self.cat = "all"
+        self._chips = {}
+
+        self.c_bg = UI_PANEL
+        self.c_sel = UI_ACCENT_BG
+        self.c_hover = UI_HOVER
+        self.c_sep = UI_BORDER
+
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+
+        def _cb_err(exc, val, tb):
+            import traceback as _tb
+            try:
+                log("悬浮条回调异常: " + "".join(
+                    _tb.format_exception(exc, val, tb)).replace("\n", " | ")[-600:])
+            except Exception:
+                pass
+        win.report_callback_exception = _cb_err
+        win.configure(bg=self.c_bg, highlightthickness=1,
+                      highlightbackground=UI_BORDER)
+
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        # 尺寸：上次拖动的大小 > 默认（按屏幕高度算一屏）
+        self.compact = bool(app.cfg.get("float_compact"))
+        self.btn_compact = None
+        self.lbl_foot = None
+        self._rsz = None
+        self._built_compact = None
+        size = app.cfg.get("float_size") or []
+        if self.compact:
+            n0 = 5
+            w, h = self.COMPACT_W, self._height_for_rows(n0)
+        elif isinstance(size, (list, tuple)) and len(size) == 2:
+            w = max(self.MIN_W, min(self.MAX_W, int(size[0])))
+            h = max(self._height_for_rows(6), min(int(size[1]), sh - 40))
+        else:
+            n0 = max(self.MIN_ROWS, min(self.MAX_ROWS,
+                                        int((sh * 0.86 - 140) / (self.ROW_H + 1))))
+            w, h = self.WIDTH, self._height_for_rows(n0)
+        self.width, self.height = int(w), int(h)
+        self._chip_rows = len(self._chip_rows_list(self.width))
+        self.n = self._rows_for_height(self.height)
+        self.height = self._height_for_rows(self.n)     # 高度吸附到整行
+        pos = app.cfg.get("float_pos") or []
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            x, y = int(pos[0]), int(pos[1])
+        else:
+            x, y = 8, max(0, (sh - self.height) // 2)
+        x = max(0, min(x, sw - self.width))
+        y = max(0, min(y, sh - self.height))
+        win.geometry(f"{self.width}x{self.height}+{x}+{y}")
+
+        self._build_all()
+        self._bind_keys()
+        log(f"悬浮条打开: {self.width}x{self.height} · {self.n} 行"
+            f"{' · 小窗' if self.compact else ''}")
+
+        # 全局抓键：小条开着的时候，↑↓/PgUp/PgDn/Home/End/Esc 都归它，
+        # 不管前台是 TradingView 还是别的什么程序。这样用户根本不用切窗口。
+        if getattr(app, "_keygrab", None) is None:
+            app._keygrab = _HotkeyGrab()
+        self._grab = app._keygrab
+        self._rep_name = None       # 正在自动重复的键
+        self._rep_job = None
+        self._rep_next = 0.0
+
+        # 恢复上次停在哪
+        want = str(app.cfg.get("float_sel") or "").upper()
+        self._want_sel = want
+        # overrideredirect 的窗口在真正映射之前设的 geometry 会被整条丢掉
+        # （见交接文档坑 55），映射之后 Tk 有时也不肯照办 —— 干脆用 Win32
+        # SetWindowPos 直接摆，位置最靠谱。
+        win.update_idletasks()
+        win.deiconify()
+        win.update()
+        self._place(x, y)
+        win.after(30, lambda: self._place(x, y))
+        win.after(60, self._raise_bar)
+        win.after(150, self._start_grab)
+        self.refresh(force=True)
+        win.after(1200, self._tick)
+
+    # ---- 全局按键 --------------------------------------------------------
+
+    def _place(self, x, y):
+        """把条子摆到屏幕 (x, y)，尺寸用 self.width / self.height。
+
+        走 Win32：overrideredirect 的窗口 Tk 会丢 geometry（交接文档坑 55）。
+        """
+        try:
+            u = ctypes.windll.user32
+            hwnd = u.GetAncestor(self.win.winfo_id(), 2)          # GA_ROOT
+            u.SetWindowPos(hwnd, 0, int(x), int(y), int(self.width), int(self.height),
+                           0x0004 | 0x0010)                        # SWP_NOZORDER|SWP_NOACTIVATE
+        except Exception:
+            try:
+                self.win.geometry(f"{self.width}x{self.height}+{int(x)}+{int(y)}")
+            except Exception:
+                pass
+
+    # ---- 尺寸：几行 <-> 高度 -------------------------------------------------
+
+    def _row_px(self):
+        return (self.COMPACT_ROW_H + 1) if self.compact else (self.ROW_H + 1)
+
+    def _chrome_px(self):
+        if self.compact:
+            return self.COMPACT_CHROME
+        # 110 是「头 + 两排 chip + 底栏」的高度，chip 折成更多排就往上加
+        return self.CHROME - 42 + 21 * int(getattr(self, "_chip_rows", 2))
+
+    def _chip_metrics(self, width=None):
+        """窄的时候用更小的字和更挤的边距，一排能多塞几个。
+
+        返回 (字号, 内边距, 片间距)；7pt 下两个汉字 18px，窄窗刚好能一排放下 7 个。
+        """
+        w = self.width if width is None else width
+        return (7, 1, 1) if int(w) < 210 else (8, 3, 2)
+
+    def _chip_rows_list(self, width):
+        """按当前宽度把 chip 折成几排，返回 [[(group, key, label), ...], ...]。"""
+        size, padx, gap = self._chip_metrics(width)
+        try:
+            f = tkfont.Font(family=self.app.ui, size=size)
+        except Exception:
+            f = None
+        avail = max(120, int(width) - 22)
+        rows, cur, wsum = [], [], 0
+        for group, items in (("mode", self.MODES), ("cat", self.CATS)):
+            for key, label in items:
+                wpx = (f.measure(label) if f else len(label) * 10) + 2 * padx + gap
+                if cur and wsum + wpx > avail:
+                    rows.append(cur)
+                    cur, wsum = [], 0
+                cur.append((group, key, label))
+                wsum += wpx
+            if cur:
+                rows.append(cur)
+                cur, wsum = [], 0
+        return rows or [[]]
+
+    def _rows_for_height(self, h):
+        return max(self.MIN_ROWS, min(self.MAX_ROWS,
+                                      int((int(h) - self._chrome_px()) // self._row_px())))
+
+    def _height_for_rows(self, n):
+        return self._chrome_px() + max(self.MIN_ROWS, int(n)) * self._row_px()
+
+    def _build_all(self):
+        self._build_head()
+        self._build_content()
+        self._build_grips()
+        self._built_compact = self.compact
+
+    def _build_content(self):
+        """chip / 列表 / 底栏 —— 改尺寸或切大小窗时只重建这三块（头和拖拽热区留着）。"""
+        for w in (getattr(self, "_chips_bar", None), getattr(self, "_sep_chip", None),
+                  getattr(self, "_body", None), getattr(self, "_sep_body", None),
+                  getattr(self, "_foot", None)):
+            try:
+                if w is not None:
+                    w.destroy()
+            except Exception:
+                pass
+        self._chips_bar = None
+        self._sep_chip = None
+        self._body = None
+        self._sep_body = None
+        self._foot = None
+        self._chips = {}
+        self._labels = []
+        self.track = None
+        self.thumb = None
+        self.lbl_foot = None
+        if not self.compact:
+            self._build_chips()
+        self._build_list()
+        if not self.compact:
+            self._build_foot()
+        self._raise_grips()
+
+    # ---- 缩放到任意大小（拖右下角 / 拖下边缘）--------------------------------
+
+    def _build_grips(self):
+        """overrideredirect 的窗口没有系统边框，自己贴两条看不见的热区来拉尺寸。"""
+        grip = tk.Label(self.win, text="◢", bg=self.c_bg, fg=UI_FAINT,
+                        font=(self.app.ui, 7), cursor="sizing")
+        grip.place(relx=1.0, rely=1.0, anchor="se", x=-1, y=-1, width=15, height=15)
+        bottom = tk.Frame(self.win, bg=self.c_bg, cursor="sb_v_double_arrow", height=4)
+        bottom.place(relx=0.0, rely=1.0, anchor="sw", relwidth=1.0, height=4)
+        self._grip = grip
+        self._gbottom = bottom
+        grip.lift()
+        bottom.lift()
+        for w, mode in ((grip, "both"), (bottom, "h")):
+            w.bind("<Button-1>", lambda e, m=mode: self._resize_start(e, m))
+            w.bind("<B1-Motion>", self._resize_move)
+            w.bind("<ButtonRelease-1>", self._resize_end)
+
+    def _raise_grips(self):
+        for w in (getattr(self, "_grip", None), getattr(self, "_gbottom", None)):
+            try:
+                if w is not None:
+                    w.lift()
+            except Exception:
+                pass
+
+    def _resize_start(self, event, mode):
+        self._rsz = (event.x_root, event.y_root, self.width, self.height, mode)
+        return "break"
+
+    def _resize_move(self, event):
+        if not self._rsz:
+            return "break"
+        x0, y0, w0, h0, mode = self._rsz
+        dx, dy = event.x_root - x0, event.y_root - y0
+        w = w0 + (dx if mode in ("both", "w") else 0)
+        h = h0 + (dy if mode in ("both", "h") else 0)
+        self._apply_size(w, h)
+        return "break"
+
+    def _resize_end(self, _event=None):
+        if not self._rsz:
+            return "break"
+        self._rsz = None
+        # 先按整行高度吸附，再存 —— 否则存进去的是没对齐的高度，
+        # 下次开出来行数会少一行
+        self._apply_size(self.width, self.height, snap=True)
+        if not self.compact:
+            try:
+                self.app.cfg["float_size"] = [self.width, self.height]
+                save_config(self.app.cfg)
+            except Exception:
+                pass
+        return "break"
+
+    def _apply_size(self, w, h, snap=False):
+        """改宽度/高度后自动重算能放几行，行数变了就重建列表。"""
+        sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
+        if self.compact:
+            w = self.COMPACT_W
+        else:
+            w = max(self.MIN_W, min(self.MAX_W, int(w)))
+        if not self.compact:
+            self._chip_rows = len(self._chip_rows_list(w))
+        h = max(self._height_for_rows(1), min(int(h), sh - 30))
+        n = self._rows_for_height(h)
+        if snap:
+            h = self._height_for_rows(n)
+        need = (n != self.n) or (self._built_compact != self.compact)
+        self.width, self.height, self.n = int(w), int(h), n
+        x, y = self.win.winfo_x(), self.win.winfo_y()
+        x = max(0, min(x, max(0, sw - self.width)))
+        y = max(0, min(y, max(0, sh - self.height - 30)))
+        self._place(x, y)
+        if need:
+            self._build_content()
+            self._built_compact = self.compact
+        self._paint()
+        self._paint_chips()
+
+    def _toggle_compact(self, event=None):
+        """小窗：只有名字 + 涨跌幅，缩成一小条扔角落；↑↓ 照样全局切 TV。"""
+        where = ""
+        try:
+            if event is not None:
+                where = f" @({event.x_root},{event.y_root}) widget={event.widget}"
+        except Exception:
+            pass
+        log(f"悬浮条切小窗: compact={self.compact} -> {not self.compact}{where}")
+        if self.compact:
+            size = self.app.cfg.get("float_size") or []
+            if isinstance(size, (list, tuple)) and len(size) == 2:
+                w, h = int(size[0]), int(size[1])
+            else:
+                w, h = self.WIDTH, self._height_for_rows(26)
+            self.compact = False
+        else:
+            self.app.cfg["float_size"] = [self.width, self.height]
+            self.compact = True
+            w = self.COMPACT_W
+            h = self._height_for_rows(5)
+        self.app.cfg["float_compact"] = self.compact
+        try:
+            save_config(self.app.cfg)
+        except Exception:
+            pass
+        self.n = self._rows_for_height(h)
+        self._apply_size(w, h, snap=False)
+        if self.btn_compact is not None:
+            try:
+                self.btn_compact.configure(text=("▣" if self.compact else "▁"))
+            except Exception:
+                pass
+        return "break"
+
+    def _start_grab(self):
+        try:
+            ok = self._grab.grab(self._on_grab)
+        except Exception as exc:
+            ok = False
+            log(f"悬浮条抓键失败: {exc}")
+        if ok:
+            extra = ""
+            if self._grab.missed:
+                extra = f"（{'/'.join(self._grab.missed)} 被别的软件占了，只有点一下条子才管用）"
+            log(f"悬浮条已接管按键: {' / '.join(self._grab.got)}{extra}")
+        else:
+            log("悬浮条没抓到全局按键，只能点一下条子再用 ↑↓")
+
+    def _on_grab(self, name):
+        """Win32 消息线程里被调用 —— 必须转回 Tk 线程再动界面。"""
+        try:
+            self.app._queue.put(("call", lambda: self._key_action(name)))
+        except Exception:
+            pass
+
+    def _raise_bar(self):
+        """只把小条提到最上层，**不抢前台**（TV 该留在前台就别动它）。"""
+        try:
+            self.win.lift()
+            self.win.attributes("-topmost", True)
+        except Exception:
+            pass
+        self._paint()
+
+    @staticmethod
+    def _vk_down(name):
+        try:
+            vk = _HotkeyGrab.VK.get(name)
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+        except Exception:
+            return False
+
+    def _key_action(self, name, rep=False):
+        """一个按键 = 走一行。rep=True 表示这是"按住不放"自动重复发出来的。"""
+        if self._closing:
+            return
+        if name == "esc":
+            self.close()
+            return
+        if name in ("up", "down"):
+            self.move(-1 if name == "up" else 1)
+        elif name in ("pgup", "pgdn"):
+            self.move(-10 if name == "pgup" else 10)
+        elif name == "home":
+            self.jump(0)
+        elif name == "end":
+            self.jump(-1)
+        else:
+            return
+        # RegisterHotKey 不会自动重复：按住只有第一下。所以自己起个轮询，
+        # 只要键还按着就继续推 —— 这才能做到"一直按着方向键，它一直往下走"。
+        if name in ("up", "down", "pgup", "pgdn"):
+            self._rep_name = name
+            if not rep:
+                self._rep_next = time.time() + 0.34   # 按住后的首延迟
+            if not self._rep_job:
+                try:
+                    self._rep_job = self.win.after(30, self._rep_tick)
+                except Exception:
+                    self._rep_job = None
+
+    def _rep_tick(self):
+        self._rep_job = None
+        name = self._rep_name
+        if self._closing or not name:
+            self._rep_name = None
+            return
+        if not self._vk_down(name):
+            self._rep_name = None
+            return
+        if time.time() >= self._rep_next:
+            self._key_action(name, rep=True)
+            self._rep_next = time.time() + 0.075     # 之后每 75ms 一行
+        try:
+            self._rep_job = self.win.after(30, self._rep_tick)
+        except Exception:
+            self._rep_job = None
+
+    # ---- 画界面 ----------------------------------------------------------
+
+    def _build_head(self):
+        head = tk.Frame(self.win, bg=self.c_bg, height=38)
+        head.pack(fill="x")
+        head.pack_propagate(False)
+        self.lbl_title = tk.Label(head, text="扫盘", bg=self.c_bg, fg=UI_FG,
+                                  font=(self.app.ui, 10, "bold"))
+        self.lbl_title.pack(side="left", padx=(12, 0))
+        self.lbl_count = tk.Label(head, text="", bg=self.c_bg, fg=UI_FAINT,
+                                  font=(self.app.ui, 8))
+        self.lbl_count.pack(side="left", padx=(8, 0))
+        self.lbl_dot = tk.Label(head, text="●", bg=self.c_bg, fg=UI_FAINT,
+                                font=(self.app.ui, 9))
+        self.lbl_dot.pack(side="right", padx=(0, 6))
+        close = tk.Label(head, text="✕", bg=self.c_bg, fg=UI_FAINT,
+                         font=(self.app.ui, 9), cursor="hand2", padx=8)
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda _e: self.close())
+        close.bind("<Enter>", lambda _e: close.configure(fg=UI_DANGER))
+        close.bind("<Leave>", lambda _e: close.configure(fg=UI_FAINT))
+        # 缩成小窗 / 还原（小窗只有名字 + 涨跌幅，↑↓ 还是全局切 TV）
+        self.btn_compact = tk.Label(head, text=("▣" if self.compact else "▁"),
+                                    bg=self.c_bg, fg=UI_FAINT,
+                                    font=(self.app.ui, 10), cursor="hand2", padx=6)
+        self.btn_compact.pack(side="right")
+        self.btn_compact.bind("<Button-1>", self._toggle_compact)
+        self.btn_compact.bind("<Enter>",
+                              lambda _e: self.btn_compact.configure(fg=UI_FG))
+        self.btn_compact.bind("<Leave>",
+                              lambda _e: self.btn_compact.configure(fg=UI_FAINT))
+        # 拖标题栏挪位置（✕ 不参与，免得想点时把窗口拖着走）
+        for w in (head, self.lbl_title, self.lbl_count, self.lbl_dot):
+            w.bind("<Button-1>", self._drag_start)
+            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<ButtonRelease-1>", self._drag_end)
+        tk.Frame(self.win, bg=self.c_sep, height=1).pack(fill="x")
+
+    def _build_list(self):
+        # 右边一条细滚动条：26 行看 745 个品种，没有滑条就只能靠按键翻
+        body = tk.Frame(self.win, bg=self.c_bg)
+        body.pack(fill="both", expand=True)
+        self._body = body
+        track = tk.Frame(body, bg=UI_HOVER, width=12)
+        track.pack(side="right", fill="y")
+        track.pack_propagate(False)
+        self.track = track
+        self.thumb = tk.Frame(track, bg=UI_FAINT, width=8, height=40)
+        self.thumb.place(x=2, y=0, width=8, height=40)
+        for w in (track, self.thumb):
+            w.bind("<Button-1>", self._scroll_press)
+            w.bind("<B1-Motion>", self._scroll_to)
+            w.bind("<ButtonRelease-1>", self._scroll_release)
+            w.bind("<MouseWheel>", self._on_wheel)
+        box = tk.Frame(body, bg=self.c_bg)
+        box.pack(side="left", fill="both", expand=True)
+        compact = self.compact
+        rh = self.COMPACT_ROW_H if compact else self.ROW_H
+        pad_t, pad_b = (3, 3) if compact else (4, 3)
+        for i in range(self.n):
+            row = tk.Frame(box, bg=self.c_bg, height=rh)
+            row.pack(fill="x")
+            row.pack_propagate(False)
+            # 行首一颗星：实心=已收藏。点它只切收藏，不切品种（小窗里不显示）
+            star = tk.Label(row, bg=self.c_bg, fg=UI_FAINT, text="☆",
+                            font=(self.app.ui, 11), cursor="hand2", width=2)
+            if not compact:
+                star.pack(side="left", padx=(6, 0), pady=(8, 0))
+            star.bind("<MouseWheel>", self._on_wheel)
+            # 左边：品种名（粗体）+ 下面一行小字成交量，跟币安侧边栏选币一个样
+            left = tk.Frame(row, bg=self.c_bg)
+            left.pack(side="left", padx=(8 if compact else 2, 0), pady=(pad_t, pad_b))
+            name = tk.Label(left, bg=self.c_bg, fg=UI_FG, anchor="w",
+                            font=(self.app.ui, 9, "bold"))
+            name.pack(anchor="w")
+            vol = tk.Label(left, bg=self.c_bg, fg=UI_DIM, anchor="w",
+                           font=(self.app.ui, 8))
+            if not compact:
+                vol.pack(anchor="w")
+            # 右边：价格 + 涨跌幅（小窗只留涨跌幅）
+            right = tk.Frame(row, bg=self.c_bg)
+            right.pack(side="right", padx=(0, 8), pady=(pad_t, pad_b))
+            price = tk.Label(right, bg=self.c_bg, fg=UI_DIM, anchor="e",
+                             font=(self.app.ui, 9))
+            if not compact:
+                price.pack(anchor="e")
+            chg = tk.Label(right, bg=self.c_bg, fg=UI_DIM, anchor="e",
+                           font=(self.app.ui, 9 if compact else 8))
+            chg.pack(anchor="e")
+            self._labels.append((row, left, right, star, name, vol, price, chg))
+            for w in (row, left, right, star, name, vol, price, chg):
+                # 点哪儿都先问一句：落在最左边那条星区就当收藏，其余当选中
+                w.bind("<Button-1>", lambda e, k=i: self._row_click(e, k))
+                w.bind("<MouseWheel>", self._on_wheel)
+        self.win.bind("<MouseWheel>", self._on_wheel)
+
+    def _scroll_press(self, event):
+        """按下滑轨/滑块：抓住鼠标（拖到窗口外面也不断），滑块提亮。
+
+        记下"按下点落在滑块里的哪个位置"（`_grab_dy`），这样拖动时用屏幕坐标换算，
+        滑块不会因为自己也在移动而互相抵消（之前就是踩了这个坑：拖半天只挪了几行）。
+        """
+        try:
+            event.widget.grab_set()
+        except Exception:
+            pass
+        try:
+            self.thumb.configure(bg=UI_DIM)
+        except Exception:
+            pass
+        try:
+            if event.widget is self.thumb:
+                self._grab_dy = event.y_root - (self.track.winfo_rooty() + self.thumb.winfo_y())
+            else:
+                self._grab_dy = 0
+        except Exception:
+            self._grab_dy = 0
+        return self._scroll_to(event)
+
+    def _thumb_visible(self):
+        return bool(self.thumb is not None and self.thumb.winfo_ismapped())
+
+    def _scroll_to(self, event):
+        """按鼠标在滑轨上的位置换算成列表偏移（拖滑块时是"跟着走"，不是一格一格跳）。"""
+        total = len(self.rows)
+        if total <= self.n:
+            return "break"
+        try:
+            h = self.track.winfo_height() or 1
+        except Exception:
+            h = 1
+        # 一律用屏幕坐标换算，别用 event.y（拖动时滑块自己在动，相对坐标会自相抵消）
+        try:
+            y = event.y_root - self.track.winfo_rooty() - getattr(self, "_grab_dy", 0)
+        except Exception:
+            y = event.y
+        frac = max(0.0, min(1.0, y / float(h)))
+        span = max(1, total - self.n)
+        self.off = max(0, min(int(round(frac * span)), span))
+        # 选中项跟着滑到可视区中间，松手才真正切 TV（拖动过程中不刷 TV）
+        self.sel = max(0, min(total - 1, self.off + self.n // 2))
+        self._paint()
+        return "break"
+
+    def _scroll_release(self, _event=None):
+        for w in (self.track, self.thumb):
+            try:
+                w.grab_release()
+            except Exception:
+                pass
+        try:
+            self.thumb.configure(bg=UI_FAINT)
+        except Exception:
+            pass
+        self._push()
+        return "break"
+
+    def _paint_scrollbar(self):
+        total = len(self.rows)
+        if self.track is None or self.thumb is None:
+            return
+        try:
+            h = self.track.winfo_height()
+        except Exception:
+            h = 0
+        if h <= 20 or total <= self.n:
+            self.thumb.place_forget()
+            return
+        hh = max(28, int(h * self.n / float(total)))
+        span = max(1, total - self.n)
+        y = int((h - hh) * (self.off / float(span)))
+        self.thumb.place(x=2, y=max(0, min(y, h - hh)), width=8, height=hh)
+        self.thumb.lift()
+
+    def _build_foot(self):
+        self._sep_body = tk.Frame(self.win, bg=self.c_sep, height=1)
+        self._sep_body.pack(fill="x")
+        foot = tk.Frame(self.win, bg=self.c_bg, height=24)
+        foot.pack(fill="x")
+        self._foot = foot
+        foot.pack_propagate(False)
+        self.lbl_foot = tk.Label(foot, text="全局 ↑↓ · 按住连着切 · Esc 关",
+                                 bg=self.c_bg, fg=UI_FAINT,
+                                 font=(self.app.ui, 8), anchor="w")
+        self.lbl_foot.pack(side="left", padx=(12, 0))
+
+    def _build_chips(self):
+        """榜单模式 + 分类筛选两排小标签（跟扫盘页顶部那排 chip 一个意思）。"""
+        bar = tk.Frame(self.win, bg=self.c_bg)
+        bar.pack(fill="x")
+        self._chips_bar = bar
+        rows = self._chip_rows_list(self.width)
+        self._chip_rows = len(rows)
+        for chips in rows:
+            line = tk.Frame(bar, bg=self.c_bg, height=19)
+            line.pack(fill="x", padx=(8, 6), pady=(0, 2))
+            line.pack_propagate(False)
+            csize, cpadx, cgap = self._chip_metrics()
+            for group, key, label in chips:
+                lb = tk.Label(line, text=label, bg=UI_HOVER, fg=UI_DIM,
+                              font=(self.app.ui, csize), padx=cpadx, pady=0,
+                              bd=0, highlightthickness=0, cursor="hand2")
+                lb.pack(side="left", padx=(0, cgap))
+                if group == "mode":
+                    lb.bind("<Button-1>", lambda _e, k=key: self._set_mode(k))
+                else:
+                    lb.bind("<Button-1>", lambda _e, k=key: self._set_cat(k))
+                lb.bind("<MouseWheel>", self._on_wheel)
+                self._chips[(group, key)] = lb
+        self._sep_chip = tk.Frame(self.win, bg=self.c_sep, height=1)
+        self._sep_chip.pack(fill="x")
+
+    def _paint_chips(self):
+        for (group, key), lb in self._chips.items():
+            on = (key == (self.mode if group == "mode" else self.cat))
+            try:
+                lb.configure(bg=(self.c_sel if on else UI_HOVER),
+                             fg=("#ffffff" if on else UI_DIM))
+            except Exception:
+                pass
+
+    def _set_mode(self, mode):
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self.app.cfg["float_mode"] = mode
+        save_config(self.app.cfg)
+        self._rebuild(keep=False, keep_pos=True)
+        self._paint_chips()
+
+    def _set_cat(self, cat):
+        if cat == self.cat:
+            return
+        self.cat = cat
+        self.app.cfg["float_cat"] = cat
+        save_config(self.app.cfg)
+        self._rebuild(keep=False, keep_pos=True)
+        self._paint_chips()
+
+    def _rebuild(self, keep=True, keep_pos=False):
+        """按当前「模式 + 分类」重建可见列表。
+
+        keep=True      —— 换榜后尽量还停在原来那个品种上（数据刷新走这条）
+        keep_pos=True  —— 换榜/换分类时**保住当前看的那一段**，不要跳回第一条
+                          （用户原话：「不管点哪一个，都会自动跳到第一个」）
+        """
+        prev_off, prev_sel = int(getattr(self, "off", 0)), int(getattr(self, "sel", 0))
+        try:
+            self.favs = set(self.app.scan_favs())
+        except Exception:
+            pass
+        cur = ""
+        if keep and self.rows and 0 <= self.sel < len(self.rows):
+            cur = str(self.rows[self.sel].get("base") or "").upper()
+        rows = list(self.base_rows or [])
+        if self.cat != "all":
+            rows = [r for r in rows if self._cat_ok(r)]
+        if self.mode == "vol":
+            rows = sorted(rows, key=lambda r: float(r.get("volume") or 0),
+                          reverse=True)
+        elif self.mode == "vol_asc":
+            rows = sorted(rows, key=lambda r: float(r.get("volume") or 0))
+        elif self.mode == "gain":
+            rows = sorted(rows, key=lambda r: float(r.get("change") or 0),
+                          reverse=True)
+        elif self.mode == "loss":
+            rows = sorted(rows, key=lambda r: float(r.get("change") or 0))
+        elif self.mode in ("oi4", "oi24"):
+            rows = self._oi_rows(rows, "topOI" if self.mode == "oi4" else "topOI24")
+        # 收藏（金星）排在整张榜最上面 —— 自选就那么几个，最该一眼看到
+        if rows and self.cat != "fav" and self.favs:
+            head = [r for r in rows if str(r.get("base") or "").upper() in self.favs]
+            rest = [r for r in rows if str(r.get("base") or "").upper() not in self.favs]
+            rows = head + rest
+        self.rows = rows
+        if keep_pos and rows:
+            span = max(0, len(rows) - self.n)
+            self.off = max(0, min(prev_off, span))
+            self.sel = max(0, min(self.off + self.n // 2, len(rows) - 1))
+        else:
+            self.off = 0
+            self.sel = 0
+            if cur:
+                idx = self._index_of(cur)
+                if idx >= 0:
+                    self.sel = idx
+                    self.off = max(0, min(idx - self.n // 2,
+                                          max(0, len(rows) - self.n)))
+        self._paint()
+        self._paint_chips()
+
+    STAR_ZONE = 26              # 行最左边 26px 算星区（点这里切收藏，不切品种）
+
+    def _row_click(self, event, slot):
+        try:
+            dx = int(event.x_root) - int(self.win.winfo_rootx())
+        except Exception:
+            dx = 999
+        if not self.compact and dx < self.STAR_ZONE:
+            return self._click_star(slot)
+        self._click_row(slot)
+        return "break"
+
+    def _click_star(self, slot):
+        """点行首的星：收藏 / 取消收藏。返回 break，别让事件再冒泡成「选这一行」。"""
+        idx = self.off + slot
+        if not (0 <= idx < len(self.rows)):
+            return "break"
+        base = str(self.rows[idx].get("base") or "").upper()
+        if not base:
+            return "break"
+        try:
+            self.app.set_scan_fav(base)
+        except Exception as exc:
+            log(f"悬浮条收藏失败: {exc}")
+            return "break"
+        self.favs = set(self.app.scan_favs())
+        if self.cat == "fav":
+            self._rebuild()
+        else:
+            self._paint()
+        return "break"
+
+    def _cat_ok(self, r):
+        """分类判断跟扫盘页 scanFilter() 保持一致：加密/TradFi 看 kind，
+        股票/黄金/商品看 cat（白银算在贵金属里）。"""
+        cat = self.cat
+        if cat == "all":
+            return True
+        if cat == "fav":
+            return str(r.get("base") or "").upper() in self.favs
+        rc = str(r.get("cat") or "")
+        kind = str(r.get("kind") or "")
+        if cat == "crypto":
+            return kind == "crypto"
+        if cat == "tradfi":          # 其他 = 外汇/债券/指数这些（不含股票/贵金属/商品）
+            return kind == "tradfi" and rc not in ("股票", "黄金", "白银", "商品")
+        if cat == "黄金":
+            return rc in ("黄金", "白银")
+        return rc == cat
+
+    def _oi_rows(self, rows, key="topOI"):
+        """持仓变化前 20：用主程序算好的榜（全品种缓存里只有持仓绝对值，排不出来）。
+
+        key="topOI" 是 4 小时窗口，key="topOI24" 是 24 小时窗口。
+        """
+        order = []
+        by_item = {}
+        try:
+            for g in (self.app.chart_rankings().get("groups") or []):
+                if g.get("key") == key:
+                    for i in (g.get("items") or []):
+                        b = str(i.get("base") or "").upper()
+                        if b:
+                            order.append(b)
+                            by_item[b] = i
+                    break
+        except Exception as exc:
+            log(f"悬浮条取增仓榜失败: {exc}")
+        by = {}
+        for r in rows:
+            by[str(r.get("base") or "").upper()] = r
+        # 榜里给的是「4 小时持仓变化%」，跟缓存行拼起来，把这列换成 OI 变化
+        # （不然排序看不到依据：涨幅列显示的是价格涨跌，跟增仓没关系）
+        out = []
+        for base in order:
+            r = by.get(base)
+            item = by_item.get(base) or {}
+            if r:
+                rr = dict(r)
+                rr["change"] = item.get("change")
+                rr["oi_chg"] = True
+                out.append(rr)
+            elif item.get("base"):
+                out.append({"base": base, "price": None,
+                            "change": item.get("change"), "oi_chg": True})
+        if not out:
+            # 榜还没算出来：先按持仓名义价值从大到小顶着
+            out = sorted(rows, key=lambda r: float(r.get("oi") or 0),
+                         reverse=True)[:20]
+        return out[:20]
+
+    # ---- 键盘 ------------------------------------------------------------
+
+    def _bind_keys(self):
+        """聚焦时的按键（全局抓键抓不到时，这些是兜底）。"""
+        w = self.win
+        w.bind("<Up>", lambda _e: self._key_action("up"))
+        w.bind("<Down>", lambda _e: self._key_action("down"))
+        w.bind("<Prior>", lambda _e: self._key_action("pgup"))
+        w.bind("<Next>", lambda _e: self._key_action("pgdn"))
+        w.bind("<Home>", lambda _e: self._key_action("home"))
+        w.bind("<End>", lambda _e: self._key_action("end"))
+        w.bind("<KeyPress-k>", lambda _e: self.move(-1))
+        w.bind("<KeyPress-j>", lambda _e: self.move(1))
+        w.bind("<Escape>", lambda _e: self.close())
+        w.bind("<FocusIn>", lambda _e: self._paint())
+
+    # ---- 数据 ------------------------------------------------------------
+
+    def refresh(self, force=False):
+        """后台拉全品种名单（有 60 秒缓存，force 才真联网）。"""
+        if self._load_running:
+            return
+        self._load_running = True
+
+        def work():
+            try:
+                rows = load_all_symbols(force=force)
+            except Exception as exc:
+                log(f"悬浮扫盘取数失败: {exc}")
+                rows = []
+            self._load_running = False
+            self._load_ts = time.time()
+            if rows:
+                self.app._queue.put(("call", lambda r=list(rows): self._apply(r)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply(self, rows):
+        """后台名单到了：**原地**更新，别把用户看的位置冲掉。
+
+        以前这里是 `_rebuild(keep=False)` + 无条件 `_push()`，后果是每 20 秒
+        数据一刷新，列表就跳回第一条、还顺手把第一条推向 TradingView ——
+        用户看到的就是「不管点哪个都自动跳到第一个」。
+        """
+        if self._closing:
+            return
+        self.base_rows = list(rows or [])
+        self._rebuild(keep=True)          # 尽量停在同一个品种上
+        moved = False
+        if getattr(self, "_want_sel", ""):
+            idx = self._index_of(self._want_sel)
+            if idx >= 0:
+                self.sel = idx
+                moved = True
+            self._want_sel = ""
+        if self._pending and self.rows:
+            self.sel = (self.sel + self._pending) % len(self.rows)
+            self._pending = 0
+            moved = True
+        self._paint()
+        if moved:                          # 只有真的换过品种才推给 TV
+            self._push()
+
+    @staticmethod
+    def _fmt_vol(value):
+        """成交量写成 1.2B / 456M 这种，跟在品种名下面一行小字用（不加「量」字）。"""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if v <= 0:
+            return ""
+        if v >= 1e9:
+            return f"{v / 1e9:.2f}B"
+        if v >= 1e6:
+            return f"{v / 1e6:.2f}M"
+        if v >= 1e3:
+            return f"{v / 1e3:.1f}K"
+        return f"{v:.0f}"
+
+    @staticmethod
+    def _fit_name(base, limit=None):
+        """名字列放不下太长的（BROCCOLIF2 这种 10 个字母），超了就截断。
+
+        注意：Tk 的 Label 一旦文本比 width 宽就会**折行**，多出来的字符会画到
+        下一行的位置上去，跟别的品种糊在一起 —— 所以宁可直接截断。
+        """
+        base = str(base or "")
+        lim = 11 if limit is None else int(limit)
+        if len(base) <= lim:
+            return base
+        return base[:lim - 1] + "…"
+
+    def _index_of(self, base):
+        for i, r in enumerate(self.rows):
+            if str(r.get("base", "")).upper() == base:
+                return i
+        return -1
+
+    def _tick(self):
+        """每 20 秒对一次名单（缓存 60 秒，所以大多数时候是白拿），并重画价格。"""
+        if self._closing:
+            return
+        try:
+            self._paint()
+            self._keep_focus()
+            if time.time() - self._load_ts > 20:
+                self.refresh()
+        except Exception as exc:
+            log(f"悬浮扫盘刷新失败: {exc}")
+        self.win.after(1000, self._tick)
+
+    # ---- 抢焦点 ----------------------------------------------------------
+
+    def bring_front(self):
+        """把小条拉到前台并拿到键盘焦点。
+
+        Windows 有前台锁：别的程序（TradingView）在前台时，直接
+        `focus_force()` 会被系统拒掉，键盘还留在 TV 上 —— 那就成了
+        「按 ↓ 结果 TV 自己在翻页」的怪事。
+
+        光调一次 SetForegroundWindow 也不保险（有时成功、有时被静默拦掉，
+        实测同一个热键连按两次结果都不一样）。所以这里做三件事并且重试：
+          1. 敲一下 Alt —— 让系统把「最近的输入」算到本进程头上，这是
+             绕前台锁最老的招；
+          2. AttachThreadInput 挂到当前前台线程上再 SetForegroundWindow；
+          3. 每一步之后都回读 GetForegroundWindow 确认真的拿到了，
+             没拿到就再试，最多 ~0.5 秒。
+        """
+        try:
+            self.win.lift()
+            self.win.focus_force()
+        except Exception:
+            pass
+        if not ctypes:
+            return
+        ok = self._grab_foreground()
+        try:
+            self.win.focus_set()
+            self.win.after(120, self._keep_focus)
+            self.win.after(400, self._keep_focus)
+        except Exception:
+            pass
+        if not ok:
+            log("悬浮条没抢到前台（系统拦了），点一下条子再按 ↑↓ 也能用")
+
+    def _grab_foreground(self, tries=6, delay=0.07):
+        """反复尝试把这条小条变成 Windows 前台窗口，成功返回 True。"""
+        try:
+            u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            hwnd = u.GetAncestor(int(self.win.winfo_id()), 2)  # GA_ROOT
+            if not hwnd:
+                return False
+            for _ in range(tries):
+                if u.GetForegroundWindow() == hwnd:
+                    return True
+                try:                       # 1. 敲一下 Alt，骗过前台锁
+                    u.keybd_event(0x12, 0, 0, 0)
+                    u.keybd_event(0x12, 0, 2, 0)
+                except Exception:
+                    pass
+                fg = u.GetForegroundWindow()
+                tid_fg = u.GetWindowThreadProcessId(fg, None) if fg else 0
+                tid_me = k.GetCurrentThreadId()
+                attached = False
+                try:                       # 2. 挂线程 + 抢前台
+                    if tid_fg and tid_fg != tid_me:
+                        attached = bool(u.AttachThreadInput(tid_me, tid_fg, True))
+                    u.BringWindowToTop(hwnd)
+                    u.SetForegroundWindow(hwnd)
+                    u.SetFocus(hwnd)
+                finally:
+                    if attached:
+                        try:
+                            u.AttachThreadInput(tid_me, tid_fg, False)
+                        except Exception:
+                            pass
+                try:                       # 3. 再补一记（有些系统只认这个）
+                    u.SwitchToThisWindow(hwnd, True)
+                except Exception:
+                    pass
+                try:
+                    self.win.update_idletasks()
+                except Exception:
+                    pass
+                if u.GetForegroundWindow() == hwnd:
+                    return True
+                time.sleep(delay)
+        except Exception as exc:
+            log(f"悬浮条抢焦点失败: {exc}")
+        return False
+
+    def _keep_focus(self):
+        """条子已经是系统前台、但 Tk 焦点跑掉了 —— 每秒把它拽回来一次。
+
+        踩过的坑：主窗口自己也注册了按键，Tk 的焦点默认留在主窗口那边。
+        只把窗口 `SetForegroundWindow` 拽到前台是没用的 —— 系统认为前台是这条
+        小条，键盘事件也发给了它，但 Tk 内部把事件派发给"焦点控件"（还挂在主
+        窗口上），于是条子里一个键都收不到。判断标准：焦点控件是不是这条小条
+        的后代，不是就抢回来。
+        """
+        try:
+            if not ctypes:
+                return
+            u = ctypes.windll.user32
+            if u.GetForegroundWindow() != u.GetAncestor(int(self.win.winfo_id()), 2):
+                return
+            f = self.win.focus_get()
+            if f is not None and str(f).startswith(str(self.win)):
+                return
+            self.win.focus_set()
+        except Exception:
+            pass
+
+    # ---- 交互 ------------------------------------------------------------
+
+    def move(self, delta):
+        if not self.rows:
+            self._pending += delta      # 数据还没到，先记住按了几下
+            return "break"
+        self.sel = (self.sel + delta) % len(self.rows)
+        self._paint()
+        self._push()
+        return "break"
+
+    def jump(self, idx):
+        """Home / End：直接跳头尾（不能走 move，取模会绕回去）。"""
+        if not self.rows:
+            return "break"
+        self.sel = 0 if idx == 0 else len(self.rows) - 1
+        self._paint()
+        self._push()
+        return "break"
+
+    def _click_row(self, slot):
+        idx = self.off + slot
+        if 0 <= idx < len(self.rows):
+            self.sel = idx
+            self._paint()
+            self._push()
+        self._raise_bar()
+        return "break"
+
+    def _on_wheel(self, event):
+        self.move(-3 if event.delta > 0 else 3)
+        return "break"
+
+    def _push(self):
+        row = self.rows[self.sel] if 0 <= self.sel < len(self.rows) else None
+        if not row:
+            return
+        base = str(row.get("base") or "").upper()
+        if not base:
+            return
+        quote = str(self.app.cfg.get("quote", "USDT"))
+        try:
+            self.app.cfg["float_sel"] = base
+            self.app.set_chart_symbol(base, quote, activate=False)
+        except Exception as exc:
+            log(f"悬浮扫盘切品种失败: {exc}")
+
+    # ---- 重画 ------------------------------------------------------------
+
+    def _paint(self):
+        rows = self.rows
+        total = len(rows)
+        n = self.n
+        if total:
+            # 选中行钉在中间那一行：每按一下整列往上滚一格，按住不放就是
+            # 一路平滑地扫下去（不是"走到页底再跳"那种一卡一卡的翻页）
+            slot = n // 2
+            if self.sel < slot:
+                self.off = 0
+            elif self.sel + (n - slot) > total:
+                self.off = max(0, total - n)
+            else:
+                self.off = self.sel - slot
+            self.off = max(0, min(self.off, max(0, total - n)))
+        else:
+            self.off = 0
+        for i, cell in enumerate(self._labels):
+            row, left, right, star, name, vol, price, chg = cell
+            idx = self.off + i
+            if idx >= total:
+                for w in (row, left, right, star, name, vol, price, chg):
+                    w.configure(bg=self.c_bg)
+                star.configure(text="", fg=UI_FAINT)
+                name.configure(text="")
+                vol.configure(text="")
+                price.configure(text="")
+                chg.configure(text="")
+                continue
+            r = rows[idx]
+            sel = (idx == self.sel)
+            bg = self.c_sel if sel else self.c_bg
+            fg = "#ffffff" if sel else UI_FG
+            lim = (9 if self.compact
+                   else max(6, min(11, (int(self.width) - 96) // 9)))
+            base = self._fit_name(r.get("base", ""), lim)
+            row.configure(bg=bg)
+            left.configure(bg=bg)
+            right.configure(bg=bg)
+            fav = str(r.get("base") or "").upper() in self.favs
+            star.configure(text=("★" if fav else "☆"), bg=bg,
+                           fg=("#ffd60a" if sel else (UI_WARN if fav else UI_FAINT)))
+            name.configure(text=base, bg=bg, fg=fg)
+            vol.configure(text=self._fmt_vol(r.get("volume")), bg=bg,
+                          fg="#ffffff" if sel else UI_DIM)
+            price.configure(text=fmt_price(r.get("price")), bg=bg,
+                            fg="#ffffff" if sel else UI_DIM)
+            ch = r.get("change")
+            up = (ch or 0) >= 0
+            chg.configure(text=(f"{ch:+.2f}%" if isinstance(ch, (int, float)) else "-"),
+                          bg=bg, fg=("#ffffff" if sel else (UI_OK if up else UI_DANGER)))
+        if total:
+            _lim = (9 if self.compact
+                    else max(6, min(11, (int(self.width) - 96) // 9)))
+            cur = self._fit_name(rows[self.sel].get("base", ""),
+                                 _lim) if self.rows else ""
+            pos = f"{cur} · {self.sel + 1}/{total}"
+        else:
+            if self.cat == "fav" and not self.favs:
+                pos = "还没收藏 · 点行首 ☆"
+            elif self.base_rows:
+                pos = "这个筛选没有品种"
+            else:
+                pos = "取数中…"
+        self.lbl_count.configure(text=(pos.replace(" · ", " ") if self.compact else pos))
+        try:
+            self.lbl_title.configure(text=("" if self.compact else "扫盘"))
+        except Exception:
+            pass
+        bridge = getattr(self.app, "_tv_bridge", None)
+        on = bool(bridge and bridge.online())
+        self.lbl_dot.configure(fg=UI_OK if on else UI_WARN)
+        if self.lbl_foot is not None:
+            self.lbl_foot.configure(
+                text=("TV 已连接 · 按住 ↑↓ 连着切" if on
+                      else "TV 未连接 · 装 tv-ext 扩展"))
+        try:
+            self._paint_chips()
+            self._paint_scrollbar()
+        except Exception:
+            pass
+
+    # ---- 拖动 / 关闭 -----------------------------------------------------
+
+    def _drag_start(self, event):
+        self._drag = (event.x_root - self.win.winfo_x(),
+                      event.y_root - self.win.winfo_y())
+
+    def _drag_move(self, event):
+        if not self._drag:
+            return
+        x = event.x_root - self._drag[0]
+        y = event.y_root - self._drag[1]
+        self._place(x, y)
+
+    def _drag_end(self, _event):
+        self._drag = None
+        try:
+            self.app.cfg["float_pos"] = [self.win.winfo_x(), self.win.winfo_y()]
+            save_config(self.app.cfg)
+        except Exception:
+            pass
+
+    def close(self):
+        self._closing = True
+        self._rep_name = None
+        try:
+            if self._rep_job:
+                self.win.after_cancel(self._rep_job)
+                self._rep_job = None
+        except Exception:
+            pass
+        try:
+            self._grab.release()       # 把关着的键还给系统（窗口留着复用）
+        except Exception:
+            pass
+        try:
+            if getattr(self.app, "cfg", None) is not None:
+                self.app.cfg["float_compact"] = self.compact
+                if not self.compact:
+                    self.app.cfg["float_size"] = [self.width, self.height]
+                save_config(self.app.cfg)
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+        self.app._float_win = None
+
+
 class TickerApp:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -3291,6 +4951,7 @@ class TickerApp:
         self._level_geom = []              # 品种名后「仓位标记」按钮命中区
         self._level_pending = None         # 本次按下落在哪个标记按钮上
         self._level_win = None             # 仓位设置弹窗
+        self._float_win = None             # 悬浮扫盘条（ScanFloat）
         self._resize = None                # 拖边缩放：当前拖的是哪条边
         self._resize_start = None          # 缩放起点（宽度/高度/字号/位置）
         self._natural_w = 0                # 上一次渲染算出来的"内容自然宽度"
@@ -3305,6 +4966,21 @@ class TickerApp:
 
         self.family = resolve_font(self.root, cfg.get("font_family"))
         self.ui = pick_ui_font(self.root)
+        # 启动自检写一行日志：以后"exe 和 BAT 看起来不一样"这种问题，看这行就够了
+        try:
+            import ctypes as _ct
+            _dpi = 0
+            try:
+                _w = _ct.windll.user32.GetAncestor(self.root.winfo_id(), 2)
+                _dpi = int(_ct.windll.user32.GetDpiForWindow(_w))
+            except Exception:
+                _dpi = int(round(self.root.winfo_fpixels("1i")))
+            log(f"界面自检: v{APP_VERSION} 主题={getattr(self, 'theme', '?')} "
+                f"字体={self.ui} 屏幕={self.root.winfo_screenwidth()}x"
+                f"{self.root.winfo_screenheight()} DPI={_dpi} "
+                f"打包={'是' if _frozen() else '否'} 目录={APP_DIR}")
+        except Exception:
+            pass
 
         # 三段式布局：顶部滚动条 / 中间行情 / 底部输入框
         self.tape = tk.Canvas(self.root, highlightthickness=0, bd=0)
@@ -3332,6 +5008,13 @@ class TickerApp:
                              cursor="hand2")
         self.more.pack(side="right", padx=(0, 5))
         self.more.bind("<Button-1>", self._on_more_click)
+        # 「扫盘」= 一键叫出悬浮扫盘条（侧边栏）。放在「更多 ▸」左边，
+        # 用户原话："在更多左边加一个选项，就是扫盘，一点扫盘就弹出这个侧边栏，然后我就可以扫盘了"。
+        # 热键常被别的软件占用 / 记不住组合，窗口里有个能点的入口最省事。
+        self.scanbtn = tk.Label(self.inbar, text="扫盘", anchor="e", bd=0,
+                                cursor="hand2")
+        self.scanbtn.pack(side="right", padx=(0, 6))
+        self.scanbtn.bind("<Button-1>", self._on_scan_click)
         self.hint = tk.Label(self.inbar, text="", anchor="e", bd=0)
         self.hint.pack(side="right", padx=(0, 8))
         # 游戏模式指示：**默认不显示**（pack_forget）。
@@ -3403,7 +5086,7 @@ class TickerApp:
         # 鼠标移到窗口边缘就换成缩放光标（自己做的边框，得自己提示）
         self.root.bind("<Motion>", self._on_hover, add="+")
         self.canvas.bind("<Motion>", self._on_hover, add="+")
-        self.root.bind("<Escape>", lambda _e: self.quit())
+        self.root.bind("<Escape>", self._on_escape)
         self.root.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
 
         self._build_menu()
@@ -3413,14 +5096,27 @@ class TickerApp:
         self._apply_widget_style()
         self._chart_server = ChartServer(self)
         self._chart_server.start()          # 开机就绪，第一次点图表不用等
+        self._tv_bridge = TVBridge(self)
+        self._tv_bridge.start()             # TradingView 联动：给浏览器扩展留的广播口
+        self._tv_open_at = 0.0              # 上次替用户打开 TV 网页的时间（防 ↑↓ 连开标签）
         self._start_fetcher()
         self._alerts.start()               # 价格提醒检查线程
         self._start_hotkeys()
         self._warm_symbols()
         self.root.after(120, self._pump)
         self.root.after(600, self._start_tape)
+        # 任务栏样式必须等窗口**真的映射出来**再设：__init__ 早期 _hwnd() 可能
+        # 拿到内层 TkChild（apply_taskbar 里有类名校验兜着），这里补一次。
+        self.root.after(300, self.apply_taskbar)
 
     # ------------------------------------------------------------ 窗口 --
+
+    def _key_color(self) -> str:
+        """纯文字模式当前该用的色键：跟文字描边同色，抗锯齿边缘才不会染色。"""
+        style = str(self.cfg.get("style", "float")).lower()
+        if style == "float":
+            return text_palette(self.cfg)["outline"]
+        return TRANSPARENT_KEY
 
     def _apply_widget_style(self):
         """滚动条 / 输入框跟随外观模式：纯文字模式用色键透明，卡片模式用底板色。"""
@@ -3433,10 +5129,11 @@ class TickerApp:
         card_bg = ((LIGHT_TINT if style == "blur" else LIGHT_CARD) if day
                    else (BLUR_TINT if style == "blur" else BG_DARK))
         pal = text_palette(cfg) if float_mode else (DARK_TEXT if day else LIGHT_TEXT)
-        bg = TRANSPARENT_KEY if float_mode else card_bg
+        bg = (self._key_color() if float_mode else card_bg)
         fsize = max(8, int(cfg.get("font_size", 9)) - 1)
         self._tape_font = (self.ui, fsize)
-        for widget in (self.tape, self.inbar, self.hint, self.canvas):
+        for widget in (self.tape, self.inbar, self.hint, self.canvas,
+                       getattr(self, "scanbtn", self.canvas)):
             try:
                 widget.configure(bg=bg)
             except Exception:
@@ -3451,6 +5148,7 @@ class TickerApp:
             )
             self.hint.configure(fg=pal["dim"], bg=bg, font=(self.ui, fsize))
             self.more.configure(fg=PANEL_ACCENT, bg=bg, font=(self.ui, fsize))
+            self.scanbtn.configure(fg=PANEL_ACCENT, bg=bg, font=(self.ui, fsize))
             self.game_label.configure(fg=LEVEL_WATCH, bg=bg, font=(self.ui, fsize))
             self.gear.configure(bg=bg)
             self.gear.paint(UI_DIM)
@@ -3465,8 +5163,9 @@ class TickerApp:
         try:
             if style == "float":
                 # 纯文字：色键透明，桌面直接透出来
-                self.root.configure(bg=TRANSPARENT_KEY)
-                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+                _k = self._key_color()
+                self.root.configure(bg=_k)
+                self.root.attributes("-transparentcolor", _k)
             elif style == "blur":
                 # 毛玻璃：不能用色键，否则没有地方承载模糊
                 bg = LIGHT_TINT if getattr(self, "theme", "night") == "day" else BLUR_TINT
@@ -3482,6 +5181,7 @@ class TickerApp:
             log(f"设置窗口属性失败: {exc}")
         self._set_blur(style == "blur")
         self.apply_click_through()
+        self.apply_taskbar()
 
     def _set_blur(self, enable):
         """开启 Windows 亚克力毛玻璃背景（未公开 API，失败就静默降级）。"""
@@ -3559,9 +5259,34 @@ class TickerApp:
         self._mapped_pos = (x, y)
         self._win_w, self._win_h = w, h
         self.root.geometry(f"{w}x{h}+{x}+{y}")
+        # ★ 这里必须先把这次 wm geometry 冲出来，再去改圆角区域。
+        #   `_apply_round_region()` 底层是 Win32 SetWindowRgn（同步调用），
+        #   它会抢在 Tk 的 idle 处理之前把窗口"重新配置"一遍，
+        #   结果 Tk 记下的这次 wm geometry 只剩尺寸生效、**位置被丢掉** ——
+        #   表现就是"重置回原来的视图"字号变了、窗口却还在原地。
+        #   （实测：去掉 region 调用或先 flush 一次 idle 都正常。）
+        #   update_idletasks 只跑 idle 任务，不会重入 after 回调，安全。
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        # ★ 窗口还没映射出来时，Tk 会**只听 wm geometry 里的位置、不理尺寸**
+        #   （实测：unmapped 时 `geometry("156x92+500+300")` 回读是 `378x550+0+0`）。
+        #   开机第一次渲染正好踩在这一档：症状是行情条以错误的尺寸闪在屏幕左上角，
+        #   要等下一轮刷新才归位。这里只在"还没映射过"时推一把，之后再设一次。
+        if not self._mapped_once:
+            try:
+                self.root.update()
+                if self.root.winfo_ismapped():
+                    self.root.geometry(f"{w}x{h}+{x}+{y}")
+                    self.root.update_idletasks()
+                    self._mapped_once = True
+            except Exception:
+                pass
         self._apply_round_region(w, h)
 
     _mapped_pos = None
+    _mapped_once = False
 
     # ---------------------------------------------- Windows 窗口扩展 --
 
@@ -3632,7 +5357,7 @@ class TickerApp:
         try:
             float_mode = str(self.cfg.get("style", "float")).lower() == "float"
             if float_mode:
-                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+                self.root.attributes("-transparentcolor", self._key_color())
             else:
                 self.root.attributes("-transparentcolor", "")
             self.root.attributes("-alpha", max(0.2, min(1.0, float(self.cfg.get("alpha", 1.0)))))
@@ -3645,12 +5370,80 @@ class TickerApp:
         self.apply_click_through()
         save_config(self.cfg)
 
+    # ---- 任务栏 / Alt+Tab 里能不能看到它 ---------------------------------
+    # 用户问：「为什么这个软件打开的时候都不会在任务栏之类的地方显示？」
+    #
+    # 答案就是下面这两位。`overrideredirect(True)`（无边框悬浮窗）的窗口，
+    # Tk 会给它置上 **WS_EX_TOOLWINDOW** —— 实测 EXSTYLE = 0x00080088
+    # （TOOLWINDOW + TOPMOST + LAYERED），而 TOOLWINDOW 的官方语义正是
+    # **"不出现在任务栏、不进入 Alt+Tab"**。这是"悬浮小窗"该有的样子，
+    # 但用户想用任务栏/Alt+Tab 找它时，就会觉得"打开了跟没打开一样"。
+    #
+    # 想让它出现：清掉 TOOLWINDOW + 加上 WS_EX_APPWINDOW。
+    # 窗口是**无主**的（GW_OWNER = 0），所以 Shell 会给它一个任务栏按钮。
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_APPWINDOW = 0x00040000
+
+    def apply_taskbar(self):
+        """按配置把窗口加进/移出任务栏与 Alt+Tab。
+
+        ⚠️ 三条注意（都是这个项目已经踩过的）：
+        1. `SetWindowLong` 之后必须补 `_restore_layered_attrs()`，
+           否则 Tk 的 alpha / 透明色键被清掉，窗口变一块不透明方块（见坑 41）；
+        2. `_hwnd()` 在 `__init__` 早期可能拿到**内层 TkChild**，
+           所以这里先校验类名必须是 `TkTopLevel`，不是就等下一轮（见 apply_click_through）；
+        3. Shell 只在"窗口显示/隐藏"时重新评估任务栏按钮 → 改完样式要
+           `ShowWindow(SW_HIDE)` + `ShowWindow(SW_SHOW)` 推它一把，不然要等下次显隐才生效。
+        """
+        if not ctypes:
+            return
+        if not self.root.winfo_ismapped():
+            return                      # 隐藏状态改样式没意义，deiconify 时会再来一次
+        hwnd = self._hwnd()
+        if not hwnd:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, buf, 64)
+            if buf.value != "TkTopLevel":
+                return                  # 还没挂到真正的顶层窗口，等下一轮
+        except Exception:
+            return
+        want = bool(self.cfg.get("show_in_taskbar", True))
+        try:
+            user32 = ctypes.windll.user32
+            ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            new = ((ex & ~self.WS_EX_TOOLWINDOW) | self.WS_EX_APPWINDOW) if want \
+                else ((ex | self.WS_EX_TOOLWINDOW) & ~self.WS_EX_APPWINDOW)
+            if new == ex:
+                return
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
+            if want:
+                user32.ShowWindow(hwnd, 0)      # SW_HIDE
+                user32.ShowWindow(hwnd, 5)      # SW_SHOW
+            self._restore_layered_attrs()
+            log(f"任务栏显示: {'开' if want else '关'}")
+        except Exception as exc:
+            log(f"设置任务栏显示失败: {exc}")
+
+    def toggle_taskbar(self, value=None):
+        """设置页那个开关：先 var 再 command（`ui_toggle` 的顺序），所以这里读 var。"""
+        if value is None:
+            value = (bool(self.var_taskbar.get())
+                     if hasattr(self, "var_taskbar")
+                     else (not bool(self.cfg.get("show_in_taskbar", True))))
+        self.cfg["show_in_taskbar"] = bool(value)
+        self.apply_taskbar()
+        save_config(self.cfg)
+
     def toggle_visible(self):
         if self._hidden:
             self.root.deiconify()
             self._hidden = False
             self.root.attributes("-topmost", bool(self.cfg.get("always_on_top", True)))
             self.apply_click_through()
+            self.apply_taskbar()            # 重新显出来时再把任务栏按钮补上
         else:
             self.root.withdraw()
             self._hidden = True
@@ -3702,16 +5495,24 @@ class TickerApp:
                 started = time.time()
                 try:
                     rows = fetch_oi_changes(scan, self.cfg.get("quote", "USDT"))
-                    top = rank_oi(rows, 10)
-                    if top:
+                    top = rank_oi(rows, 20)
+                    top24 = rank_oi(rows, 20, key="change24")
+                    if top or top24:
                         merged = dict(self._market_overview or {})
-                        merged["topOI"] = top
+                        if top:
+                            merged["topOI"] = top
+                        if top24:
+                            merged["topOI24"] = top24
                         self._market_overview = merged
                         self._tape_dirty = True
                         self._queue.put(("render", None))
-                        log(f"增仓榜已更新：查了 {len(rows)} 个币，"
+                        log(f"持仓变化榜已更新：查了 {len(rows)} 个币，"
                             f"耗时 {time.time()-started:.1f}s，"
-                            f"首位 {top[0]['base']} {top[0]['change']:+.2f}%")
+                            f"4H 首位 {top[0]['base']} {top[0]['change']:+.2f}%，"
+                            f"24H 首位 {top24[0]['base']} {top24[0]['change24']:+.2f}%"
+                            if (top and top24) else
+                            f"持仓变化榜已更新：查了 {len(rows)} 个币，"
+                            f"耗时 {time.time()-started:.1f}s")
                 except Exception as exc:
                     log(f"增仓榜刷新失败: {exc}")
                 if self._stop.wait(interval):
@@ -3794,6 +5595,8 @@ class TickerApp:
             self.toggle_game_mode()
         elif name == "scan":
             self.open_scan()
+        elif name == "float":
+            self.toggle_float()
 
     def _update_hotkey_hint(self, labels):
         """把实际注册成功的组合键写进菜单。
@@ -3813,6 +5616,16 @@ class TickerApp:
                 self.menu.entryconfigure(idx, label=f"隐藏窗口（{combo}）")
             except Exception:
                 pass
+        # 悬浮扫盘条：主候选 Ctrl+Alt+F 常被别的软件占了，会自动顺延到备用组合，
+        # 菜单上写死第一个候选只会误导用户（按了没反应，以为功能坏了）
+        fidx = getattr(self, "_mi_float_idx", None)
+        if fidx is not None:
+            try:
+                combo = self._hotkey_labels.get("float") or "未注册"
+                self.menu.entryconfigure(
+                    fidx, label=f"悬浮扫盘条（置顶 · ↓ 直切 TV · {combo}）")
+            except Exception:
+                pass
         # 游戏模式同理 —— 锁住鼠标之后只剩热键能解开，更不能忘
         gidx = getattr(self, "_mi_game_idx", None)
         if gidx is not None:
@@ -3826,7 +5639,7 @@ class TickerApp:
             return
         try:
             menu.delete(0, "end")
-            for key in ("toggle", "menu", "symbols", "click", "game", "scan"):
+            for key in ("toggle", "menu", "symbols", "click", "game", "scan", "float"):
                 name = HOTKEY_NAMES.get(key, key)
                 menu.add_command(label=f"{name}   {self._hotkey_labels.get(key, '未注册')}",
                                  state="disabled")
@@ -3846,6 +5659,42 @@ class TickerApp:
     # ---------------------------------------------------------- 渲染 --
 
     def render(self):
+        """重入保护：`render()` 里有 `update_idletasks()`，它会**当场处理挂起事件**，
+        而那些事件（滚动条回调、after、<Configure>）里又有人调 `render()`。
+
+        内层 render 先 `delete("all")` 再画字，外层回来后继续往同一张画布上画 ——
+        于是**两帧的文字同时留在画布上**：价格变成"80,978.05"和"80,909.93"叠在一起，
+        再被色键抗锯齿一染，看上去就是"字体/样式全乱了"（用户报的 exe 样式没加载）。
+        Tk 画布不做双缓冲，这种情况只能靠"同一时刻只允许一个 render 在跑"来解决。
+        """
+        if getattr(self, "_rendering", False):
+            # 正在画：记一个"待重画"，等这一轮结束再补一次（否则会丢掉这次数据）
+            self._render_pending = True
+            return
+        self._rendering = True
+        try:
+            self._render_impl()
+        finally:
+            self._rendering = False
+            if getattr(self, "_render_pending", False):
+                self._render_pending = False
+                try:
+                    self.root.after(16, self.render)
+                except Exception:
+                    pass
+
+    def _render_impl(self):
+        # ⚠️ 诊断：Tk 不是线程安全的。任何后台线程（抓价 / 持仓量 / 图表服务）
+        #    直接调 render() 都会和目标线程的绘制交错，画面上就是**文字重影、
+        #    数字叠在一起**（用户看到的"样式没加载"其实就是这个）。
+        #    这里先只记录，不改行为，用来定位是谁在后台乱画。
+        if threading.current_thread() is not threading.main_thread():
+            _t = threading.current_thread().name
+            if not hasattr(self, "_bad_threads"):
+                self._bad_threads = set()
+            if _t not in self._bad_threads:
+                self._bad_threads.add(_t)
+                log(f"⚠ 后台线程调用了 render(): {_t}")
         cfg = self.cfg
         cv = self.canvas
         cv.delete("all")
@@ -3880,7 +5729,7 @@ class TickerApp:
         header_h = (f_meta.metrics("linespace") + 2) if show_header else 0
 
         # 列宽（价格列宽单调递增，避免数字位数变化导致窗口左右跳动）
-        show_del = bool(cfg.get("show_del", False))
+        show_del = bool(cfg.get("show_del", True))
         show_bell = bool(cfg.get("show_alert", True))
         ICON_W = 13                       # 每个图标占的宽度（图形只有 5~8px，
                                           # 格子太宽行尾就会空出一截"莫名的空格"）
@@ -3948,11 +5797,25 @@ class TickerApp:
         self.root.update_idletasks()
         self._natural_w = int(width)        # 拖边缩放要用它反推字号（见 _do_resize）
         try:
-            # ⚠️ 只把**底部输入栏**的请求宽度算进来。
-            #   千万别把滚动条(tape)的请求宽度也算上 —— 它上一次被设成多宽，
-            #   这一次就"要求"多宽，于是宽度只增不减（自锁棘轮），
-            #   拖边缩放也会因此变得迟钝。
-            need = max(int(width), self.inbar.winfo_reqwidth())
+            # ⚠️ 这里**只**能拿输入栏里各控件"自己要多大"来兜底，
+            #   不能问 inbar 自己的请求宽度，也绝不能把滚动条(tape)算进来：
+            #   这两个控件都被显式设过 width，而它们的"请求宽度"就是
+            #   **上一次被设成多宽** —— 用它算 need 等于宽度只增不减（自锁棘轮）：
+            #   字号调大窗口变宽之后，再把字号调小窗口也缩不回去。
+            #   （用户报的"拖完就调不回去了"就是这个：inbar_req 会一路
+            #    156 → 233 → 377 记住历史最大值。）
+            need = 0
+            for _child in self.inbar.winfo_children():
+                if not _child.winfo_ismapped():
+                    continue
+                if _child is getattr(self, "hint", None):
+                    # 提示文字是动态的（网络错误能写几百字），拿它定窗口宽度
+                    # 会让窗口被一条错误信息撑成超宽，然后自动贴边又算歪。
+                    # 旧版同样没把它算进去，这里保持一致。
+                    continue
+                need += min(_child.winfo_reqwidth(), int(width))
+            need += 12                      # 各控件的 padx 余量
+            need = max(int(width), need)
         except Exception:
             need = int(width)
         width = need
@@ -3967,7 +5830,8 @@ class TickerApp:
                 self.hint.configure(font=(self.ui, max(8, size - 1)))
             except Exception:
                 pass
-        cv.configure(width=width, height=height, bg=TRANSPARENT_KEY if float_mode else card_bg)
+        cv.configure(width=width, height=height,
+                     bg=(self._key_color() if float_mode else card_bg))
 
         self._set_geometry(width, height + tape_h + inbar_h)
 
@@ -4130,7 +5994,15 @@ class TickerApp:
 
     def _in_input_area(self, event):
         """点在底部输入区时不要触发拖拽/双击图表。"""
-        return event.widget in (self.entry, self.inbar, self.hint, self.more)
+        return event.widget in (self.entry, self.inbar, self.hint, self.more,
+                                getattr(self, "scanbtn", self.more))
+
+    def _on_scan_click(self, _event=None):
+        """点「扫盘」= 打开/聚焦悬浮扫盘条（侧边栏），然后按 ↑↓ 扫。"""
+        if self._blocked():
+            return "break"
+        self.open_float()
+        return "break"
 
     def _on_more_click(self, _event=None):
         """点「更多 ▸」打开品种选择器。"""
@@ -4141,31 +6013,82 @@ class TickerApp:
 
     DRAG_SLOP = 5                       # 超过这么多像素才算"拖动"，不是"点击"
 
-    # ---- 拖边缩放（v0.19）---------------------------------------------
+    # ---- 拖边缩放（v0.21 重做）------------------------------------------
     # 用户要求：「鼠标能拖动这个窗口的大小，它会自适应的缩小字，不妨碍我看」。
-    # overrideredirect 窗口没有系统边框，所以边缘感应区得自己做。
-    RESIZE_PX = 6
+    # 窗口是 overrideredirect（系统边框被去掉了），所以感应区得自己做。
+    #
+    # ⚠️ 旧版有四个要命的毛病，这次一起清掉：
+    #   1) 感应区太窄（6px）而且**底边整条都不能拖**——
+    #      底部是输入栏，`_in_input_area()` 先把事件拦掉了，
+    #      于是"从下面拉窗口"永远没反应；
+    #   2) 缩放时 `_pos_auto` 还开着，每次 render 都把窗口重新贴回右边缘，
+    #      窗口从鼠标底下溜走 → 拖起来一卡一卡的、根本拖不动；
+    #   3) 左上边缩放的位置补偿用的是**已经改过**的 self._pos/_win_w，
+    #      越拖偏得越远，最后跑到屏幕外面回不来；
+    #   4) 在跑马灯上按下（顶边）开始缩放后，`_on_tape_release` 先
+    #      `return "break"`，`_end_resize()` 压根没跑，
+    #      self._resize/_resize_start 永远留着 —— 之后随便一按一动，
+    #      窗口就按**旧锚点**乱缩放，这就是"逻辑有问题、调不回去"。
+    #
+    # 现在的模型（简单、可逆、1:1 跟手）：
+    #   * 按下时把窗口矩形 (x, y, w, h) **冻结**成拖拽基准，全程只跟它比；
+    #   * 鼠标位移 → 目标的宽/高；锚定边（离鼠标远的那条边）钉死不动；
+    #   * 目标尺寸换算成连续比例 → 字号 = 基准字号 × 比例，
+    #     比例的上下限**由字号上下限反推**，所以任何字号一次拖拽都能到两端，
+    #     鼠标拖回出发点就精确回到开始的字号 —— 拖错了原路返回即可；
+    #   * 一旦开拖就关掉 `_pos_auto`，位置完全由这次拖拽说了算。
+    RESIZE_PX = 8                      # 四条边的感应带宽度
+    RESIZE_CORNER_PX = 14              # 四个角再放宽一点，好抓
     RESIZE_CURSORS = {"left": "size_we", "right": "size_we",
                       "top": "size_ns", "bottom": "size_ns",
                       "tl": "size_nw_se", "br": "size_nw_se",
                       "tr": "size_ne_sw", "bl": "size_ne_sw"}
 
+    def _win_rect(self):
+        """窗口当前的真实矩形 (x, y, w, h)；拿不到就返回 None。
+
+        ⚠️ 一定读 Tk 的实测值，不要用缓存的 self._win_w/_win_h：
+        缓存在 render() 里才更新，和"鼠标此刻看到的窗口"经常差一帧。
+        """
+        r = self.root
+        try:
+            r.update_idletasks()
+            w = int(r.winfo_width())
+            h = int(r.winfo_height())
+            x = int(r.winfo_x())
+            y = int(r.winfo_y())
+        except Exception:
+            return None
+        if w <= 1 or h <= 1:                       # 还没映射出来
+            w = int(self._win_w or 0)
+            h = int(self._win_h or 0)
+            if w <= 1 or h <= 1:
+                return None
+            x = int(self._pos[0]) if self._pos else 0
+            y = int(self._pos[1]) if self._pos else 0
+        return (x, y, w, h)
+
     def _resize_zone(self, x, y):
         """鼠标在窗口边缘的哪一段？返回 None / left / right / top / bottom / 四角。"""
-        w, h = int(self._win_w or 0), int(self._win_h or 0)
-        if w <= 20 or h <= 20:
+        rect = self._win_rect()
+        if not rect:
             return None
-        left = x <= self.RESIZE_PX
-        right = x >= w - self.RESIZE_PX
-        top = y <= self.RESIZE_PX
-        bot = y >= h - self.RESIZE_PX
-        if top and left:
+        _wx, _wy, w, h = rect
+        if w < 40 or h < 40:                        # 太小了，别让整窗都变成边框
+            return None
+        edge = max(3, min(self.RESIZE_PX, w // 4, h // 4))
+        corner = max(edge, min(self.RESIZE_CORNER_PX, w // 3, h // 3))
+        left = x <= edge
+        right = x >= w - edge
+        top = y <= edge
+        bot = y >= h - edge
+        if y <= corner and x <= corner:
             return "tl"
-        if top and right:
+        if y <= corner and x >= w - corner:
             return "tr"
-        if bot and left:
+        if y >= h - corner and x <= corner:
             return "bl"
-        if bot and right:
+        if y >= h - corner and x >= w - corner:
             return "br"
         if left:
             return "left"
@@ -4186,63 +6109,134 @@ class TickerApp:
             return (event.x, event.y)
 
     def _begin_resize(self, zone, event):
+        rect = self._win_rect()
+        if not rect:
+            return
+        wx, wy, w, h = rect
         self._resize = zone
         self._resize_start = {
-            "zone": zone, "x": event.x_root, "y": event.y_root,
-            "w": int(self._win_w or 0), "h": int(self._win_h or 0),
-            "size": int(self.cfg.get("font_size", 9)),
-            "pos": list(self._pos),
+            "zone": zone,
+            "px": int(getattr(event, "x_root", wx)),
+            "py": int(getattr(event, "y_root", wy)),
+            "x": wx, "y": wy, "w": w, "h": h,        # 冻结的基准矩形
+            "size": int(self.cfg.get("font_size", FONT_SIZE_DEFAULT)),
         }
+        # ★ 缩放期间绝不能"自动贴右边缘"：那会在手底下把窗口挪走。
+        #   位置从此由这次拖拽接管（锚定边钉死，见 _do_resize）。
+        self._pos_auto = False
+        self._pos = [wx, wy]
         self._drag = None
         self._drag_moved = False
         self._icon_pending = None
         self._level_pending = None
+        self._cancel_tape_click()          # 顶边压在跑马灯上，别把这次按下当成"点币种"
+        self._last_drag_time = time.time()
         try:
             self.root.configure(cursor=self.RESIZE_CURSORS.get(zone, "fleur"))
+            self._cursor_now = self.RESIZE_CURSORS.get(zone, "fleur")
+        except Exception:
+            pass
+
+    def _apply_resize_geometry(self, x, y):
+        """把窗口挪到 (x, y)。位置是这次拖拽算出来的，不参与自动摆放。"""
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+        except Exception:
+            screen_w = screen_h = 0
+        if screen_w and screen_h:
+            # 别把窗口整块推出屏幕：至少留 48px 在身上，找得回来
+            x = max(-(self._win_w - 48), min(x, screen_w - 48))
+            y = max(0, min(y, screen_h - 48))
+        self._pos = [int(x), int(y)]
+        self._mapped_pos = (int(x), int(y))
+        try:
+            self.root.geometry(f"+{int(x)}+{int(y)}")
         except Exception:
             pass
 
     def _do_resize(self, event):
         """拖边 = 整体缩放：字号按比例变，窗口尺寸跟着内容自适应。
 
-        为什么用"缩放字号"而不是"拉伸画布"：一行的列宽全是按字号量出来的，
+        为什么是"缩放字号"而不是"拉伸画布"：一行的列宽全是按字号量出来的，
         字号一动，价格/涨跌/标记列会**一起**等比缩放，数字不会挤在一起、
         也不会被裁掉 —— 这正是用户要的"自适应的缩小字，不妨碍看"。
+
+        位置：锚定边（离鼠标远的那条边）在屏幕上钉死不动，
+        鼠标拖到哪，被拖的那条边就跟到哪 —— 所以是 1:1 跟手，不会跳。
         """
         st = getattr(self, "_resize_start", None)
         if not st:
             return
         zone = st["zone"]
-        dx = event.x_root - st["x"]
-        dy = event.y_root - st["y"]
-        w0, h0 = max(st["w"], 1), max(st["h"], 1)
-        want_w = w0 + (dx if "r" in zone or zone == "right" else
-                       (-dx if "l" in zone or zone == "left" else 0))
-        want_h = h0 + (dy if "b" in zone or zone == "bottom" else
-                       (-dy if "t" in zone or zone == "top" else 0))
-        # 只按"真正被拖的那个方向"定比例；四角优先用宽度
+        dx = int(getattr(event, "x_root", st["px"])) - st["px"]
+        dy = int(getattr(event, "y_root", st["py"])) - st["py"]
+        w0, h0 = max(int(st["w"]), 1), max(int(st["h"]), 1)
+
+        # 1) 目标矩形：被拖的边跟鼠标走，另一条边不动
+        # ⚠️ 必须用**集合**判断，不能用 `"t" in zone` 这种子串判断 ——
+        #    "bottom" 里也有一个 't'！旧版靠 `"b" in zone` 写在前面才侥幸正确，
+        #    这次重写必须把方向判断做成不会踩坑的形式。
+        if zone in ("left", "tl", "bl"):
+            want_w, anchor_x = w0 - dx, st["x"] + st["w"]      # 右边缘锚定
+        else:
+            want_w, anchor_x = w0 + dx, st["x"]                # 左边缘锚定
+        if zone in ("top", "tl", "tr"):
+            want_h, anchor_y = h0 - dy, st["y"] + st["h"]      # 下边缘锚定
+        else:
+            want_h, anchor_y = h0 + dy, st["y"]                # 上边缘锚定
+
+        # 2) 比例 → 字号。上下限由字号边界反推，保证一次拖拽能到任意一端。
+        #    上下边只看高度，其余（左右 + 四角）看宽度 —— 行高由字号决定，
+        #    高度方向也确实是同一套比例，不会算出两个互相打架的字号。
+        base = max(int(st["size"]), 1)
         if zone in ("top", "bottom"):
             ratio = want_h / float(h0)
         else:
             ratio = want_w / float(w0)
-        ratio = max(0.4, min(3.0, ratio))
-        new_size = int(round(st["size"] * ratio))
-        new_size = max(7, min(24, new_size))
-        if new_size == int(self.cfg.get("font_size", 9)):
+        ratio = max(FONT_SIZE_MIN / float(base), min(FONT_SIZE_MAX / float(base), ratio))
+        new_size = max(FONT_SIZE_MIN,
+                       min(FONT_SIZE_MAX, int(round(base * ratio))))
+        if new_size == int(self.cfg.get("font_size", FONT_SIZE_DEFAULT)):
             return
         self.cfg["font_size"] = new_size
-        self.render()
-        # 拖左边/上边时，让对边别动
-        if "l" in zone or zone == "left":
-            self._pos = [st["pos"][0] + (st["w"] - self._win_w), self._pos[1]]
-        if "t" in zone or zone == "top":
-            self._pos = [self._pos[0], st["pos"][1] + (st["h"] - self._win_h)]
-        self._mapped_pos = None
+        self._price_width = 0                  # 列宽要按新字号重算
+        self.render()                          # 里面会按新字号重设几何
+        # 3) 重新贴合锚定边（窗口尺寸是内容算出来的，不会正好等于 want_*）
+        w = int(self._win_w or 0) or w0
+        h = int(self._win_h or 0) or h0
+        x = anchor_x - w if zone in ("left", "tl", "bl") else anchor_x
+        y = anchor_y - h if zone in ("top", "tl", "tr") else anchor_y
+        cursor = self.RESIZE_CURSORS.get(zone, "fleur")
+        self._apply_resize_geometry(x, y)
         try:
-            self.root.geometry(f"+{int(self._pos[0])}+{int(self._pos[1])}")
+            if getattr(self, "_cursor_now", "") != cursor:
+                self._cursor_now = cursor
+                self.root.configure(cursor=cursor)
         except Exception:
             pass
-        self._schedule_save_position()
+
+    def _cancel_resize(self):
+        """Esc / 右键：撤销这次拖拽，回到按下前的字号和位置。"""
+        st = getattr(self, "_resize_start", None)
+        if not st:
+            return False
+        self._resize = None
+        self._resize_start = None
+        self.cfg["font_size"] = int(st["size"])
+        self._price_width = 0
+        self._pos = [int(st["x"]), int(st["y"])]
+        self._mapped_pos = None
+        self.render()
+        self._pos = [int(st["x"]), int(st["y"])]
+        self._apply_resize_geometry(st["x"], st["y"])
+        try:
+            self.root.configure(cursor="")
+        except Exception:
+            pass
+        self._cursor_now = ""
+        log(f"已取消缩放，回到字号 {st['size']}")
+        return True
 
     def _end_resize(self):
         st = getattr(self, "_resize_start", None)
@@ -4252,9 +6246,15 @@ class TickerApp:
             self.root.configure(cursor="")
         except Exception:
             pass
-        if st and int(self.cfg.get("font_size", 9)) != st["size"]:
-            save_config(self.cfg)          # 缩放结果落盘（下次开机还是这个大小）
-            log(f"窗口缩放 → 字号 {self.cfg['font_size']}")
+        self._cursor_now = ""
+        if st and int(self.cfg.get("font_size", FONT_SIZE_DEFAULT)) != int(st["size"]):
+            # 缩放结果落盘：字号 + 缩放后的位置（下次开机还是这个样子）。
+            # 位置一定存，否则重开时又会自动贴右边缘，"跳"一下。
+            if self._pos:
+                self.cfg["position"] = [int(self._pos[0]), int(self._pos[1])]
+            save_config(self.cfg)
+            log(f"窗口缩放 → 字号 {self.cfg['font_size']}"
+                f"（右键菜单「重置回原来的视图」可恢复默认大小）")
 
     def _on_hover(self, event):
         """鼠标移到边缘就换缩放光标，让人知道"这儿能拖"。"""
@@ -4278,14 +6278,17 @@ class TickerApp:
     def _on_press(self, event):
         if self._blocked():
             return "break"
-        if self._in_input_area(event):
-            return
-        # 拖窗口边缘 = 缩放（先判断，不然会被当成拖窗口/点图标）
+        # ★ 边缘感应**必须排在输入区判断前面**：窗口底边整条都压在输入栏上，
+        #   以前先 return 掉，导致"从下面/下角拉窗口"永远没反应。
+        #   现在最外圈那几像素属于缩放边框（和系统窗口一个规矩），
+        #   往里才是输入框的地盘。
         x, y = self._win_xy(event)
         zone = self._resize_zone(x, y)
         if zone:
             self._begin_resize(zone, event)
             return "break"
+        if self._in_input_area(event):
+            return
         # 行尾图标（闹铃/垃圾桶）和品种名后的仓位标记按钮：
         # 都不要走拖窗口那套，否则第一下就把窗口拖走了
         hit = None
@@ -4312,8 +6315,13 @@ class TickerApp:
 
     def _on_drag(self, event):
         if self._blocked():
+            # 游戏模式中途被打开：先把缩放收尾，别把状态留着
+            if getattr(self, "_resize", None):
+                self._end_resize()
             return "break"
         if getattr(self, "_resize", None):
+            self._drag_moved = True
+            self._last_drag_time = time.time()
             self._do_resize(event)
             return "break"
         if not self._drag:
@@ -4334,6 +6342,8 @@ class TickerApp:
 
     def _on_release(self, event):
         if self._blocked():
+            if getattr(self, "_resize", None):
+                self._end_resize()
             return "break"
         if getattr(self, "_resize", None):
             self._end_resize()
@@ -4387,9 +6397,21 @@ class TickerApp:
 
     def _save_position(self):
         self._save_job = None
-        if self._pos:
+        # 自动贴边摆放（_pos_auto）不落盘：那是"默认视图"，
+        # 存下来反而会把"重置回原来的视图"的效果弄丢。
+        if self._pos and not getattr(self, "_pos_auto", False):
             self.cfg["position"] = [int(self._pos[0]), int(self._pos[1])]
             save_config(self.cfg)
+
+    def _on_escape(self, _event=None):
+        """Esc：正在拖边缩放就先撤销这次缩放，否则才是退出程序。
+
+        ⚠️ 以前 Esc 直接 `quit()` —— 拖缩放到一半按 Esc 会把整个行情条关掉。
+        """
+        if self._cancel_resize():
+            return "break"
+        self.quit()
+        return "break"
 
     def _on_wheel(self, event):
         if self._blocked():
@@ -4537,6 +6559,11 @@ class TickerApp:
     def _on_tape_press(self, event):
         if self._blocked():
             return "break"
+        # 顶边也是缩放边框：压在跑马灯最上面那几像素时别开始"拖窗口"，
+        # 交给 _on_press 去开缩放（bindtags 顺序：先 tape，再 toplevel）。
+        x, y = self._win_xy(event)
+        if self._resize_zone(x, y):
+            return None
         self._begin_press(event)
 
     def _on_tape_release(self, event):
@@ -4548,6 +6575,13 @@ class TickerApp:
         （见 `_on_tape_double`），所以双击不会顺手加一个。
         """
         if self._blocked():
+            return "break"
+        # ★ 这里必须先给缩放收尾：tape 的绑定跑在 toplevel 前面，
+        #   旧版直接 return "break" 把 root._on_release 挡掉了，
+        #   在顶边拖完一放，_resize/_resize_start 就永远留着 —— 之后
+        #   随便一按一动都按旧锚点乱缩放。这就是"拖完之后就调不回去"。
+        if getattr(self, "_resize", None):
+            self._end_resize()
             return "break"
         moved = self._drag_moved
         self._drag = None
@@ -4591,6 +6625,8 @@ class TickerApp:
         if self._blocked():
             return "break"
         self._cancel_tape_click()
+        if self._dragged_recently():          # 刚拖过（含拖边缩放）就别跳图表
+            return "break"
         base = self._tape_base_at(event.x)
         if not base:
             return "break"
@@ -4616,13 +6652,22 @@ class TickerApp:
     # ------------------------------------------------------ 内联输入 --
 
     PLACEHOLDER = "输入币种，回车添加…"
+    PLACEHOLDER_SHORT = "输入币种…"     # 窗口窄的时候用（底栏多了「扫盘」之后放不下长文案）
+
+    def _placeholder_text(self):
+        """按输入框当前宽度挑文案：窄了就换短的，别让提示语被切一半。"""
+        try:
+            w = int(self.entry.winfo_width())
+        except Exception:
+            w = 0
+        return self.PLACEHOLDER if w >= 150 else self.PLACEHOLDER_SHORT
 
     def _placeholder_on(self):
-        return self.entry.get() == self.PLACEHOLDER
+        return self.entry.get() in (self.PLACEHOLDER, self.PLACEHOLDER_SHORT)
 
     def _show_placeholder(self):
         self.entry.delete(0, "end")
-        self.entry.insert(0, self.PLACEHOLDER)
+        self.entry.insert(0, self._placeholder_text())
         try:
             self.entry.configure(fg=self._placeholder_fg or "#8e8e93")
         except Exception:
@@ -4992,6 +7037,7 @@ class TickerApp:
         self.var_scheme = tk.StringVar(value=str(self.cfg.get("scheme", "west")))
         self.var_head = tk.BooleanVar(value=bool(self.cfg.get("show_header", False)))
         self.var_click = tk.BooleanVar(value=bool(self.cfg.get("click_through", False)))
+        self.var_taskbar = tk.BooleanVar(value=bool(self.cfg.get("show_in_taskbar", True)))
         self.var_font = tk.StringVar(value=str(self.cfg.get("font_family", "")))
         self.var_effect = tk.StringVar(value=str(self.cfg.get("text_effect", "outline")))
         self.var_color = tk.StringVar(value=str(self.cfg.get("text_color", "black")))
@@ -5001,8 +7047,9 @@ class TickerApp:
         self.var_input = tk.BooleanVar(value=bool(self.cfg.get("show_input", True)))
         self.var_capfilter = tk.IntVar(value=int(self.cfg.get("market_cap_filter", 20)))
         self.var_dblclick = tk.BooleanVar(value=bool(self.cfg.get("dblclick_chart", True)))
+        self.var_tvlink = tk.BooleanVar(value=bool(self.cfg.get("tv_link", True)))
         self.var_oi = tk.BooleanVar(value=bool(self.cfg.get("show_oi", True)))
-        self.var_del = tk.BooleanVar(value=bool(self.cfg.get("show_del", False)))
+        self.var_del = tk.BooleanVar(value=bool(self.cfg.get("show_del", True)))
         self.var_alert = tk.BooleanVar(value=bool(self.cfg.get("show_alert", True)))
         self.var_levels = tk.BooleanVar(value=bool(self.cfg.get("show_levels", True)))
         self.var_game = tk.BooleanVar(value=bool(getattr(self, "_game_mode", False)))
@@ -5026,6 +7073,8 @@ class TickerApp:
                           command=self._toggle_input)
         m.add_checkbutton(label="双击行打开图表", variable=self.var_dblclick,
                           command=self._toggle_dblclick)
+        m.add_checkbutton(label="点品种联动 TradingView", variable=self.var_tvlink,
+                          command=self._toggle_tvlink)
         m.add_checkbutton(label="持仓变化榜", variable=self.var_oi,
                           command=self._toggle_oi)
         m.add_checkbutton(label="显示删除按钮（行尾 ×）", variable=self.var_del,
@@ -5052,7 +7101,7 @@ class TickerApp:
         m.add_separator()
 
         style_menu = tk.Menu(m, tearoff=0)
-        style_menu.add_radiobutton(label="纯文字悬浮（背景全透明）", variable=self.var_style,
+        style_menu.add_radiobutton(label="纯文字悬浮（背景全透明·空白处点不到）", variable=self.var_style,
                                    value="float", command=self._toggle_style)
         style_menu.add_radiobutton(label="毛玻璃（透明度 + 背景模糊）", variable=self.var_style,
                                    value="blur", command=self._toggle_style)
@@ -5139,7 +7188,7 @@ class TickerApp:
 
         # 热键放进二级菜单，避免长文案把主菜单撑宽
         hk_menu = tk.Menu(m, tearoff=0)
-        for key in ("toggle", "menu", "symbols", "click", "game"):
+        for key in ("toggle", "menu", "symbols", "click", "game", "scan", "float"):
             hk_menu.add_command(label=f"{HOTKEY_NAMES.get(key, key)}", state="disabled")
         m.add_cascade(label="热键", menu=hk_menu)
         self._hk_menu = hk_menu
@@ -5158,6 +7207,11 @@ class TickerApp:
         m.add_command(label="⚙  设置…（全部开关）", command=self.open_settings)
         m.add_command(label="立即刷新", command=self.force_refresh)
         m.add_separator()
+        # ★ 拖边缩放改的是字号，拖极端了就回不来；给一条确定的退路。
+        #   放在最前面，用户"调坏了"的时候一眼就能找到。
+        m.add_command(label="↺  重置回原来的视图（大小 / 位置）",
+                      command=self.reset_view)
+        m.add_separator()
         m.add_checkbutton(label="游戏模式（锁鼠标）", variable=self.var_game,
                           command=self.toggle_game_mode)
         self._mi_game_idx = m.index("end")
@@ -5165,12 +7219,15 @@ class TickerApp:
         m.add_separator()
         m.add_command(label="全品种扫盘（全市场 · ↑↓ 切）…", command=self.open_scan)
         m.add_command(label="选择品种…", command=self.open_symbols)
+        m.add_command(label="悬浮扫盘条（置顶 · ↓ 直切 TV）",
+                      command=self.toggle_float)
+        self._mi_float_idx = m.index("end")
         m.add_separator()
         m.add_command(label=f"隐藏窗口（{HOTKEY_DEFS['toggle'][0][0]}）",
                       command=self.toggle_visible)
         self._mi_hide_idx = m.index("end")
         hk_menu = tk.Menu(m, tearoff=0)
-        for key in ("toggle", "menu", "symbols", "click", "game", "scan"):
+        for key in ("toggle", "menu", "symbols", "click", "game", "scan", "float"):
             hk_menu.add_command(label=f"{HOTKEY_NAMES.get(key, key)}", state="disabled")
         m.add_cascade(label="热键", menu=hk_menu)
         self._hk_menu = hk_menu
@@ -5188,6 +7245,8 @@ class TickerApp:
         self.var_scheme.set(str(self.cfg.get("scheme", "west")))
         self.var_head.set(bool(self.cfg.get("show_header", False)))
         self.var_click.set(bool(self.cfg.get("click_through", False)))
+        if hasattr(self, "var_taskbar"):
+            self.var_taskbar.set(bool(self.cfg.get("show_in_taskbar", True)))
         self.var_font.set(str(self.cfg.get("font_family", self.family)))
         self.var_effect.set(str(self.cfg.get("text_effect", "outline")))
         self.var_color.set(str(self.cfg.get("text_color", "black")))
@@ -5210,6 +7269,8 @@ class TickerApp:
     def _on_menu(self, event):
         if self._blocked():
             return "break"
+        if getattr(self, "_resize", None):     # 拖缩放到一半右键：先收尾
+            self._end_resize()
         self._refresh_menu_vars()
         try:
             self.menu.tk_popup(event.x_root, event.y_root)
@@ -5229,11 +7290,55 @@ class TickerApp:
         save_config(self.cfg)
 
     def set_font_size(self, value):
-        value = max(8, min(28, int(value)))
+        """改字号（菜单 / Ctrl+滚轮 / 设置中心都走这里）。
+
+        ⚠️ 边界必须和拖边缩放用同一对常量，否则两边能设出的范围不一样，
+        用户会觉得"拖到某个大小之后菜单就调不回来了"。
+        注意别顺手 `save_config` 掉位置：自动摆放状态下位置不落盘。
+        """
+        value = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, int(value)))
         self.cfg["font_size"] = value
         self._price_width = 0
         self.render()
         save_config(self.cfg)
+
+    def reset_view(self):
+        """右键菜单「重置回原来的视图」：窗口大小 + 位置回到默认。
+
+        拖边缩放改的是**字号**，字号一动窗口就跟着变。一旦拖到极端值，
+        或者窗口被屏幕边缘夹住，光靠拖是回不到默认大小的 ——
+        所以这里给一条确定的退路（用户明确要求）：
+            * 字号 → 默认 9 → 窗口回到默认大小
+            * 位置 → 默认（自动贴右上角，之后宽度变化也一直贴着右边缘）
+        """
+        # 先把进行中的拖拽/待保存的旧位置清掉，不然重置完还会被拽回去
+        self._resize = None
+        self._resize_start = None
+        self._drag = None
+        self._drag_moved = False
+        self._icon_pending = None
+        self._level_pending = None
+        if self._save_job:
+            try:
+                self.root.after_cancel(self._save_job)
+            except Exception:
+                pass
+            self._save_job = None
+        try:
+            self.root.configure(cursor="")
+        except Exception:
+            pass
+        self._cursor_now = ""
+
+        self.cfg["font_size"] = FONT_SIZE_DEFAULT
+        self.cfg["position"] = None        # None = 回到"自动贴右上角"
+        self._price_width = 0
+        self._pos = None
+        self._pos_auto = True
+        self._mapped_pos = None
+        self.render()
+        save_config(self.cfg)
+        log(f"视图已重置：字号 {FONT_SIZE_DEFAULT}、位置回到默认（贴右上角）")
 
     def _toggle_top(self):
         self.cfg["always_on_top"] = bool(self.var_top.get())
@@ -5277,6 +7382,19 @@ class TickerApp:
         self.cfg["dblclick_chart"] = bool(self.var_dblclick.get())
         save_config(self.cfg)
         log(f"双击打开图表: {'开' if self.cfg['dblclick_chart'] else '关'}")
+
+    def _toggle_tvlink(self):
+        self.cfg["tv_link"] = bool(self.var_tvlink.get())
+        save_config(self.cfg)
+        on = self.cfg["tv_link"]
+        log(f"TradingView 联动: {'开' if on else '关'}")
+        if on:
+            bridge = getattr(self, "_tv_bridge", None)
+            if bridge is not None:
+                log(f"  联动接口: {bridge.url or '(没起来)'}"
+                    f"  扩展在线: {'是' if bridge.online() else '否（装一下 tv-ext 扩展）'}")
+                if bridge.online():
+                    self.tv_push(*self._chart_target, force=True)
 
     def _toggle_oi(self):
         self.cfg["show_oi"] = bool(self.var_oi.get())
@@ -5605,6 +7723,10 @@ class TickerApp:
 
     def _toggle_style(self):
         self.cfg["style"] = self.var_style.get()
+        self.cfg["style_migrated_v33"] = True     # 用户自己选的，别再自动迁移
+        if str(self.cfg["style"]).lower() == "float":
+            log("外观切换为「纯文字全透明」：色键透明的像素在 Windows 上点不到，"
+                "只有字形能接事件，所以空白处拖不动窗口（系统行为，不是 bug）")
         self._apply_style_attrs()
         self._mapped_pos = None          # 强制重设一次几何，让圆角区域重新生效
         self.render()
@@ -5714,6 +7836,7 @@ class TickerApp:
         """
         quote = quote or self.cfg.get("quote", "USDT")
         self._chart_target = (base, quote)
+        self.tv_push(base, quote)            # ← 扫盘 ↑↓ / 侧栏点击都从这里联动 TradingView
         if not activate:
             return
         # 注意：必须先读旧时间戳再判断。页面开着就只换数据，不碰浏览器。
@@ -5854,15 +7977,33 @@ class TickerApp:
         for s in self.cfg.get("symbols", []):
             watching.add(str(s).upper().split("-")[0])
 
-        def pack(key):
+        def pack(key, limit=10):
             out = []
-            for item in (ov.get(key) or [])[:10]:
+            for item in (ov.get(key) or [])[:limit]:
+                base = str(item.get("base") or "").strip()
+                if not base:
+                    continue
+                num = item.get("change")
+                if key == "topOI24":
+                    num = item.get("change24")
+                elif num is None:
+                    num = item.get("change")
+                out.append({
+                    "base": base,
+                    "change": round(float(num or 0.0), 2),
+                    "inWatch": base.upper() in watching,
+                })
+            return out
+
+        def pack24():
+            out = []
+            for item in (ov.get("topOI24") or [])[:20]:
                 base = str(item.get("base") or "").strip()
                 if not base:
                     continue
                 out.append({
                     "base": base,
-                    "change": round(float(item.get("change") or 0.0), 2),
+                    "change": round(float(item.get("change24") or 0.0), 2),
                     "inWatch": base.upper() in watching,
                 })
             return out
@@ -5873,12 +8014,124 @@ class TickerApp:
             {"key": "topVolume", "label": "成交量前十", "tone": "vol"},
         ]
         if bool(self.cfg.get("show_oi", True)):
-            groups.append({"key": "topOI", "label": "增仓前十", "tone": "up"})
+            groups.append({"key": "topOI", "label": "4H 持仓前20", "tone": "up"})
+            groups.append({"key": "topOI24", "label": "24H 持仓前20", "tone": "up"})
 
         return {
             "quote": quote,
-            "groups": [dict(g, items=pack(g["key"])) for g in groups],
+            "groups": [dict(g, items=(pack24() if g["key"] == "topOI24"
+                                      else pack(g["key"], 20 if g["key"] == "topOI" else 10)))
+                       for g in groups],
         }
+
+    # ------------------------------------------- TradingView 联动 --
+
+    def tv_link_enabled(self):
+        return bool(self.cfg.get("tv_link", True))
+
+    def tv_base_code(self, base):
+        """汉字品种名 -> TradingView 上的代码。返回 (代码, 是否已确定)。"""
+        b = str(base or "").strip()
+        if not b or b.isascii():
+            return b, True
+        code = TV_CN_ALIAS.get(b) or (self.cfg.get("tv_alias") or {}).get(b)
+        return (str(code) if code else b), bool(code)
+
+    def tv_symbol(self, base, quote=None):
+        """本地换算出 TradingView 符号（不联网，秒出）。
+
+        中文币要换成拼音代码，否则 TV 收到 BINANCE:哈基米USDT.P 会当无效符号，
+        setSymbol 静默失败 —— 用户看到的就是"中文的点了没反应"。
+        """
+        quote = quote or self.cfg.get("quote", "USDT")
+        code, _known = self.tv_base_code(base)
+        return tradingview_symbol(code, quote, self.cfg.get("market", "perp"),
+                                  self.cfg.get("tv_exchange", "BINANCE"))
+
+    def tv_resolve_async(self, base, quote=None):
+        """汉字品种名：后台去 TradingView 搜一次拼音代码，查到就缓存并补推。"""
+        b = str(base or "").strip()
+        if not b or b.isascii():
+            return
+        seen = getattr(self, "_tv_resolving", None)
+        if seen is None:
+            seen = self._tv_resolving = set()
+        if b in seen:
+            return
+        seen.add(b)
+        quote = quote or self.cfg.get("quote", "USDT")
+
+        def work():
+            found = None
+            try:
+                found = tradingview_resolve(
+                    b, quote, self.cfg.get("market", "perp"),
+                    self.cfg.get("tv_exchange", "BINANCE"))
+            except Exception as exc:
+                log(f"中文币反查失败 ({b}): {exc}")
+            finally:
+                seen.discard(b)
+            code = ""
+            if found:
+                sym = str(found).split(":", 1)[-1]          # HAJIMIUSDT.P
+                tail = f"{quote}.P"
+                if sym.upper().endswith(tail.upper()):
+                    code = sym[:-len(tail)]
+            if not code:
+                log(f"TradingView 上没收录「{b}」，这个品种跳过联动")
+                return
+            try:
+                self.cfg.setdefault("tv_alias", {})[b] = code
+                save_config(self.cfg)
+            except Exception:
+                pass
+            log(f"中文币代码: {b} -> {code}")
+            try:
+                self._queue.put(("call", lambda: self.tv_push(b, quote, force=True)))
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def tv_chart_url(self, base, quote=None):
+        return ("https://www.tradingview.com/chart/?symbol="
+                + urllib.parse.quote(self.tv_symbol(base, quote)))
+
+    def tv_push(self, base, quote=None, force=False):
+        """把当前品种广播给 tv-ext 扩展（扩展会切用户自己的 TradingView 标签页）。
+
+        没有扩展 / 扩展没在线时**不要**在这里开浏览器：
+        扫盘一下按几十次 ↑↓，每次都开一个标签就是灾难。
+        开网页的事只交给 open_tradingview 里的 tv_ensure_open（带冷却）。
+        """
+        bridge = getattr(self, "_tv_bridge", None)
+        if bridge is None or not base:
+            return False
+        if not force and not self.tv_link_enabled():
+            return False
+        _code, known = self.tv_base_code(base)
+        if not known:
+            # 汉字名还没换算出拼音代码：后台查一次，查到再推
+            self.tv_resolve_async(base, quote)
+            return False
+        symbol = self.tv_symbol(base, quote)
+        if not symbol:
+            return False
+        return bridge.push(symbol, str(base).upper(),
+                           (quote or self.cfg.get("quote", "USDT")).upper())
+
+    def tv_ensure_open(self, base, quote=None):
+        """扩展不在线时，用默认浏览器打开一次 TradingView（两分钟内不重复开）。"""
+        now = time.time()
+        if now - getattr(self, "_tv_open_at", 0.0) < 120.0:
+            return
+        self._tv_open_at = now
+        url = self.tv_chart_url(base, quote)
+        try:
+            webbrowser.open(url)
+            log(f"打开 TradingView: {url}")
+        except Exception as exc:
+            log(f"打开 TradingView 失败: {exc}")
 
     def open_tradingview(self, base=None, quote=None):
         """切换图表页当前品种。
@@ -5892,10 +8145,27 @@ class TickerApp:
         self._chart_target = (base, quote)
         self._want_scan = False              # 切品种 = 回到行情图表页
 
+        # 联动开着 → 走 TradingView：扩展去切用户自己那个已登录的 TV 标签页。
+        # 用户明确说过：不要再弹一个"什么功能都没有的自建图表"。
+        if self.tv_link_enabled():
+            self.tv_push(base, quote)
+            # 扩展的 keepalive alarm 是 30 秒一次，MV3 的 service worker 平时会被
+            # 挂起 —— 只看 20 秒会误判成"没装"，于是每按一次就多弹一个 TV 页。
+            # 90 秒内有扩展来轮询过，就当它在线。
+            if not (self._tv_bridge and (self._tv_bridge.online(90.0)
+                                         or self._tv_bridge.seen_ever())):
+                self.tv_ensure_open(base, quote)
+            return
+
         port = self._chart_server.start() if self._chart_server else 0
         if not port:
             # 服务起不来就退回老办法：直接开 TradingView
-            url = tradingview_url(base, quote, self.cfg.get("market", "perp"),
+            code, known = self.tv_base_code(base)
+            if not known:
+                # 汉字名还不知道 TV 代码：先后台查，查到会自己开
+                self.tv_resolve_async(base, quote)
+                return
+            url = tradingview_url(code, quote, self.cfg.get("market", "perp"),
                                   self.cfg.get("tv_exchange", "BINANCE"))
             log(f"图表页不可用，直接打开 {url}")
             try:
@@ -6020,6 +8290,46 @@ class TickerApp:
                              daemon=True).start()
         except Exception as exc:
             log(f"打开浏览器失败: {exc}")
+
+    # ------------------------------------------------------ 悬浮扫盘条 --
+
+    def open_float(self):
+        """打开（或重新聚焦）悬浮扫盘条。
+
+        用户的原话：「能不能做那种悬浮框一样的？我一直按着方向键，它就跟着变，
+        就左边侧边栏这样子的东西。」——所以要的是一个**置顶、自己拿焦点**的小条：
+        在 TV 前台时按热键叫出来，按住 ↓ 就一路扫，TV 在右边自己换。
+        """
+        win = getattr(self, "_float_win", None)
+        if win is not None:
+            try:
+                if win.win.winfo_exists():
+                    win.win.deiconify()
+                    win.win.lift()
+                    win.win.focus_force()
+                    win.refresh()
+                    return
+            except Exception:
+                pass
+        try:
+            self._float_win = ScanFloat(self)
+            log("悬浮扫盘条已打开（↑↓ 切换，TV 会自动跟着换）")
+        except Exception as exc:
+            log(f"打开悬浮扫盘条失败: {exc}")
+            self._float_win = None
+
+    def toggle_float(self):
+        win = getattr(self, "_float_win", None)
+        alive = False
+        try:
+            alive = bool(win is not None and win.win.winfo_exists())
+        except Exception:
+            alive = False
+        if alive:
+            win.close()
+            log("悬浮扫盘条已关闭")
+        else:
+            self.open_float()
 
     def _surface_chart_window(self, tries=14):
         """把图表页那个浏览器窗口还原并拉到前台。
@@ -6751,6 +9061,14 @@ class TickerApp:
             except Exception:
                 pass
             setattr(self, attr, None)
+        # 悬浮扫盘条是自己画的颜色，换主题就关掉（再按热键就是新配色）
+        fw = getattr(self, "_float_win", None)
+        try:
+            if fw is not None:
+                fw.close()
+        except Exception:
+            pass
+        self._float_win = None
         sym = getattr(self, "_sym_win", None)
         try:
             if sym is not None and sym.winfo_exists():
@@ -6909,10 +9227,30 @@ class TickerApp:
         ui_toggle(box, "顶部滚动条（榜单跑马灯）", self.var_tape, self._toggle_tape, fnt)
         ui_toggle(box, "底部输入框", self.var_input, self._toggle_input, fnt)
         ui_toggle(box, "双击行情行打开图表", self.var_dblclick, self._toggle_dblclick, fnt)
+        ui_toggle(box, "点品种/扫盘时联动 TradingView（需装 tv-ext 扩展）",
+                  self.var_tvlink, self._toggle_tvlink, fnt)
+        # 悬浮扫盘条：TV 在前台也能一路扫，热键之外给一个能点的地方
+        # （热键可能被别的软件占了、自动换过备用组合，所以这里读实际的）
+        hk = (getattr(self, "_hotkey_labels", {}) or {}).get("float") \
+            or HOTKEY_DEFS["float"][0][0]
+        rowf = tk.Frame(box, bg=UI_BG)
+        rowf.pack(fill="x", pady=(0, 6))
+        ui_button(rowf, f"打开悬浮扫盘条（{hk}）",
+                  self.open_float, kind="ghost", font=(self.ui, 9)).pack(side="left")
+        tk.Label(rowf, text="贴左边缘 · 按住 ↓ 连着切 TV", bg=UI_BG, fg=UI_FAINT,
+                 font=(self.ui, 8)).pack(side="left", padx=(8, 0))
         ui_toggle(box, "行尾删除按钮（×，单击直删）", self.var_del, self._toggle_del, fnt)
         ui_toggle(box, "行尾提醒按钮（🔔）", self.var_alert, self._toggle_alert, fnt)
         ui_toggle(box, "仓位 / 关注价位标记列", self.var_levels, self._toggle_levels, fnt)
         ui_sep(box, pady=(8, 8))
+        ui_header(box, "窗口", "无边框悬浮窗默认不进任务栏").pack(
+            fill="x", pady=(0, 10))
+        ui_toggle(box, "在任务栏 / Alt+Tab 里显示", self.var_taskbar,
+                  self.toggle_taskbar, fnt)
+        tk.Label(box, text="关掉它就跟以前一样：只在桌面上飘着，"
+                           "靠 Ctrl+Alt+H 显隐。",
+                 bg=UI_BG, fg=UI_FAINT, font=(self.ui, 8), anchor="w",
+                 justify="left").pack(fill="x", pady=(0, 8))
         ui_header(box, "鼠标", "").pack(fill="x", pady=(0, 10))
         ui_toggle(box, "窗口置顶", self.var_top, self._toggle_top, fnt)
         ui_toggle(box, "鼠标穿透（整窗不挡点击）", self.var_click,
@@ -6922,7 +9260,7 @@ class TickerApp:
 
     def _settings_look(self, box, fnt):
         ui_header(box, "外观样式", "").pack(fill="x", pady=(0, 10))
-        ui_choice(box, "样式", (("纯文字（全透明）", "float"),
+        ui_choice(box, "样式", (("纯文字（全透明·不好拖）", "float"),
                                 ("毛玻璃", "blur"), ("纯色卡片", "card")),
                   self.var_style, self._toggle_style, fnt)
         ui_choice(box, "涨跌配色", (("绿涨红跌", "west"), ("红涨绿跌", "cn")),
@@ -6952,6 +9290,18 @@ class TickerApp:
         if fonts:
             ui_choice(box, "字体", tuple((lab, fam) for lab, fam in fonts[:6]),
                       self.var_font, self._toggle_font, fnt)
+        ui_sep(box, pady=(8, 8))
+        # 拖边缩放 / Ctrl+滚轮把窗口调乱了之后，一键回到默认大小和位置
+        row = tk.Frame(box, bg=UI_BG)
+        row.pack(fill="x")
+        tk.Label(row, text="窗口大小 / 位置", bg=UI_BG, fg=UI_FG, width=14,
+                 anchor="w", font=fnt).pack(side="left")
+        ui_button(row, "↺ 重置回原来的视图", self.reset_view,
+                  kind="ghost", font=fnt).pack(side="left")
+        tk.Label(box, text=f"恢复默认字号 {FONT_SIZE_DEFAULT}，位置回到右上角；"
+                           "拖边缩放拖坏了就点它。",
+                 bg=UI_BG, fg=UI_FAINT, font=(self.ui, 8), anchor="w",
+                 justify="left").pack(fill="x", pady=(4, 0))
 
     def _settings_theme(self, box, fnt):
         ui_header(box, "主题皮肤", "对话框 + 图表页 + 扫盘页一起换").pack(
@@ -7733,6 +10083,64 @@ def enable_dpi_awareness():
             pass
 
 
+_SINGLE_INSTANCE_MUTEX = None
+
+
+def acquire_single_instance():
+    """只允许跑一个实例；已经有的话把老的窗口提到前面，然后自己退出。
+
+    为什么需要：以前没有这道锁，双击/快捷方式一多开就会有两个进程抢
+    17653 端口和全局热键 —— 表现为「热键失灵」「点品种有时不联动」
+    「开了两个小窗」，看起来就像"用别的方式启动有问题"。
+    返回 True = 我是唯一实例；False = 已经有别人在跑了。
+    """
+    global _SINGLE_INSTANCE_MUTEX
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
+                                     wintypes.LPCWSTR]
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        h = k32.CreateMutexW(None, False, "Local\\CryptoTickerSingleInstance")
+        if not h:
+            return True
+        if ctypes.get_last_error() == 183:      # ERROR_ALREADY_EXISTS
+            k32.CloseHandle(h)
+            _focus_existing_window()
+            return False
+        _SINGLE_INSTANCE_MUTEX = h              # 全程持有，进程退出才释放
+        return True
+    except Exception:
+        return True                             # 锁本身出问题就别拦人启动
+
+
+def _focus_existing_window():
+    """把已经在跑的主窗（或悬浮条）捞到前面来，让用户知道"它开着呢"。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _cb(hwnd, _lp):
+            if not u.IsWindowVisible(hwnd):
+                return True
+            buf = ctypes.create_unicode_buffer(256)
+            u.GetWindowTextW(hwnd, buf, 256)
+            if buf.value.strip() == "Crypto Ticker":
+                found.append(hwnd)
+            return True
+
+        u.EnumWindows(_cb, 0)
+        for hwnd in found[:2]:
+            u.ShowWindow(hwnd, 9)               # SW_RESTORE
+            u.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 def main(argv=None):
     args = parse_args(argv)
     cfg = load_config()
@@ -7756,6 +10164,10 @@ def main(argv=None):
     if args.no_change:
         cfg["show_change"] = False
 
+    if not args.self_test and not acquire_single_instance():
+        log("已经有一个行情条在跑了，这次启动退出（老窗口已提到前面）")
+        return 0
+
     pairs = build_pairs(cfg["symbols"], cfg["quote"])
 
     if args.self_test:
@@ -7773,7 +10185,19 @@ def main(argv=None):
         save_config(cfg)
 
     enable_dpi_awareness()
-    app = TickerApp(cfg)
+    try:
+        app = TickerApp(cfg)
+    except Exception:
+        # ★ 打包成 --noconsole 的 exe 之后，**启动期任何异常都是彻底静默的**：
+        #   没有 stderr、没有日志、没有窗口 —— 双击就是"什么都没发生"，
+        #   用户只能得出"这个 exe 根本不能启动"的结论（实际是它起了一半就死了）。
+        #   所以这里必须①写日志 ②弹窗，把人话和 traceback 摆到脸上。
+        tb = traceback.format_exc()
+        log("启动失败：\n" + tb)
+        _fatal_dialog(f"行情条启动失败，没有窗口能显示出来。\n\n"
+                      f"错误信息：\n{tb.strip().splitlines()[-1]}\n\n"
+                      f"完整日志：{os.path.join(APP_DIR, 'ticker.log')}")
+        return 1
     try:
         app.render()
     except Exception:
@@ -7791,8 +10215,35 @@ def main(argv=None):
     return 0
 
 
+def _fatal_dialog(text):
+    """启动期致命错误的人话提示。
+
+    `--noconsole` 的 exe 连一个字符都吐不出来，"双击没反应"就是这么来的。
+    这里直接用 Win32 MessageBox 把原因摆出来；弹不出来也不能再抛异常。
+    """
+    try:
+        if ctypes:
+            ctypes.windll.user32.MessageBoxW(None, str(text), "行情条 - 启动失败", 0x10)
+            return
+    except Exception:
+        pass
+    try:
+        print(text, file=sys.stderr)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(0)
+    except Exception:
+        # main() 之外还会抛的（比如 import 期、参数解析期）也兜住：
+        # 同样写日志 + 弹窗，绝不做"静默退出"。
+        try:
+            log("致命错误：\n" + traceback.format_exc())
+        except Exception:
+            pass
+        _fatal_dialog(traceback.format_exc())
+        sys.exit(1)

@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "行情条 · TradingView 联动",
+  "version": "1.0.0",
+  "description": "行情条（crypto-ticker）里点品种、扫盘时按 ↑↓，自动切换你正在用的 TradingView 图表的品种：不刷新页面、不丢画线、不丢布局。",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://*.tradingview.com/*"
+  ],
+  "background": {
+    "service_worker": "bg.js"
+  },
+  "action": {
+    "default_title": "行情条 · TradingView 联动",
+    "default_popup": "popup.html"
+  }
+}

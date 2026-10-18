@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; width: 260px; font: 12px/1.6 "Microsoft YaHei", sans-serif;
+         background: #11161d; color: #dfe6ee; }
+  .hd { padding: 10px 12px; border-bottom: 1px solid #232c38; font-weight: 700; }
+  .bd { padding: 10px 12px; }
+  .row { display: flex; justify-content: space-between; gap: 8px; margin: 4px 0; }
+  .k { color: #8b98a8; }
+  .v { text-align: right; word-break: break-all; }
+  .ok { color: #66bb6a; }
+  .bad { color: #ef5350; }
+  .hint { margin-top: 8px; padding-top: 8px; border-top: 1px solid #232c38;
+          color: #8b98a8; font-size: 11px; }
+  code { color: #ffd54f; }
+</style>
+</head>
+<body>
+  <div class="hd">行情条 · TradingView 联动</div>
+  <div class="bd">
+    <div class="row"><span class="k">联动接口</span><span class="v" id="port">-</span></div>
+    <div class="row"><span class="k">最近切换</span><span class="v" id="sym">-</span></div>
+    <div class="row"><span class="k">结果</span><span class="v" id="res">-</span></div>
+    <div class="row"><span class="k">时间</span><span class="v" id="at">-</span></div>
+    <div class="hint" id="hint">在行情条里点品种，或在扫盘页按 ↑ ↓。</div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

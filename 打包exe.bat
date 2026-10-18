@@ -47,6 +47,11 @@ if errorlevel 1 (
 )
 
 echo.
+echo [3.5/4] 把 exe 复制一份到仓库根目录（开始菜单快捷方式指向这里）...
+copy /y "dist\行情条.exe" "行情条.exe" >nul
+if errorlevel 1 echo   ! 复制失败，可能行情条.exe 正在运行，先退出它再打一次
+
+echo.
 echo [4/4] 收尾：把示例配置和启动器放进 dist
 copy /y "config.example.json" "dist\config.example.json" >nul
 copy /y "启动.vbs" "dist\启动.vbs" >nul 2>nul

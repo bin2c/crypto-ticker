@@ -22,6 +22,7 @@
   "show_oi": true,
   "oi_refresh": 600,
   "click_through": false,
+  "show_in_taskbar": true,
   "hotkeys": true,
   "always_on_top": true,
   "title": "行情",
