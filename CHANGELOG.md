@@ -1,3 +1,26 @@
+## v0.37 — 换成羽毛图标（exe / 任务栏 / Alt+Tab 全换）
+
+**用户原话**：「还有就是这个 icon，你就用那个羽毛啊，不是挺好看的。不要用这个默认的，这个很丑啊」。
+
+**问题**：exe 一直是 PyInstaller 的默认图标；而且任务栏认的是**窗口自己设的图标**（`WM_SETICON`），
+只在打包时 `--icon` 只解决资源管理器里那一个，跑起来任务栏还是默认那张。
+
+**改法**：
+
+1. 现画一套羽毛图标：`tools/make_icon.py`（PIL 绘制，无外部素材依赖）→
+   `assets/feather.png`（1024）+ `assets/行情条.ico`（256/128/64/48/40/32/24/20/16 九种尺寸）。
+   构图：深色圆角方块（`#151c26→#0b0e11`）+ 斜置白色羽片 + 深色翎管 + 左右对称的羽枝缺口，
+   小到 16px 也能看出是羽毛。
+2. 打包带 `--icon "assets\行情条.ico"`，并把 ico 一起 `--add-data "assets\行情条.ico;assets"` 塞进 exe。
+3. 运行时 `TickerApp._install_app_icon()`：先 `SetCurrentProcessExplicitAppUserModelID("CryptoTicker.App")`
+   （不然任务栏会跟 python 归一组），再 `root.iconbitmap(default=ico)` —— 用 `default=` 是因为它会给
+   之后所有 Toplevel（扫盘条、设置框）继承，不用一个个设；没 ico 就退 `iconphoto(png)`。
+
+**验收**：`行情条.exe` 资源管理器里是羽毛；启动后任务栏、Alt+Tab 里也是羽毛。
+
+> 顺带修两个把这次改动坑住的老问题：`traceback` 从来没 import（异常兜底自己会 `NameError`，
+> 无控制台的 exe 就成了"双击没反应"）；以及我插方法时插进了 `__init__` 里，把后面的初始化吞了。
+
 ## v0.36 — 行尾「×」回来了；默认值不再"少个键就消失"
 
 **用户原话**：「不是，我悬浮窗的删除品种，怎么给你搞没了」。

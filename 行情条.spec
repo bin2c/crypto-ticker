@@ -5,7 +5,7 @@ a = Analysis(
     ['ticker.py'],
     pathex=[],
     binaries=[],
-    datas=[('lightweight-charts.js', '.')],
+    datas=[('lightweight-charts.js', '.'), ('assets/行情条.ico', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets/行情条.ico'],
 )

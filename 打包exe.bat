@@ -37,7 +37,9 @@ rem --add-data 把图表库塞进 exe；分号在 Windows 上是分隔符
 "%PY%" -m PyInstaller ^
   --noconfirm --clean --onefile --noconsole ^
   --name "行情条" ^
+  --icon "assets\行情条.ico" ^
   --add-data "lightweight-charts.js;." ^
+  --add-data "assets\行情条.ico;assets" ^
   ticker.py
 if errorlevel 1 (
   echo.

@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -79,7 +80,7 @@ def _resolve_dirs():
 
 
 APP_DIR, RES_DIR = _resolve_dirs()   # APP_DIR=可写（配置/日志/缓存）  RES_DIR=只读资源
-APP_VERSION = "0.36"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
+APP_VERSION = "0.37"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 # ---------------------------------------------------------------- 默认配置 --
@@ -4961,6 +4962,7 @@ class TickerApp:
 
         self.root = tk.Tk()
         self.root.title("Crypto Ticker")
+        self._install_app_icon()
         self.root.overrideredirect(True)
         self._apply_style_attrs()
 
@@ -5108,6 +5110,41 @@ class TickerApp:
         # 任务栏样式必须等窗口**真的映射出来**再设：__init__ 早期 _hwnd() 可能
         # 拿到内层 TkChild（apply_taskbar 里有类名校验兜着），这里补一次。
         self.root.after(300, self.apply_taskbar)
+
+    def _install_app_icon(self):
+        """窗口 / 任务栏 / Alt+Tab 用羽毛图标（assets\行情条.ico）。
+
+        为什么要有这段：
+          * 打包成 exe 后，资源管理器里看到的是 exe 内嵌图标（`--icon`）；
+          * 但**任务栏**认的是窗口自己设的图标（`WM_SETICON`），所以 Tk 也得设一次，
+            不然任务栏会显示 Python / PyInstaller 的默认图标。
+          * `iconbitmap(default=...)` 设的是**默认图标**，之后新建的 Toplevel
+            （扫盘条、设置对话框…）都会自动继承，不用一个个设。
+        """
+        try:                       # 任务栏按 AUMID 归组，不设的话会跟 python 归一堆
+            import ctypes as _ct
+            _ct.windll.shell32.SetCurrentProcessExplicitAppUserModelID("CryptoTicker.App")
+        except Exception:
+            pass
+        paths = []
+        for base in (RES_DIR, APP_DIR):
+            paths.append(os.path.join(base, "assets", "行情条.ico"))
+            paths.append(os.path.join(base, "assets", "feather.png"))
+        ico = next((p for p in paths if p.endswith(".ico") and os.path.exists(p)), None)
+        png = next((p for p in paths if p.endswith(".png") and os.path.exists(p)), None)
+        if ico:
+            try:
+                self.root.iconbitmap(default=ico)
+                return
+            except Exception as exc:
+                log(f"窗口图标: iconbitmap 失败（{exc}），改用 png")
+        if png:
+            try:
+                self._icon_photo = tk.PhotoImage(file=png)
+                self.root.iconphoto(True, self._icon_photo)
+            except Exception as exc:
+                log(f"窗口图标: 没设上（{exc}）")
+
 
     # ------------------------------------------------------------ 窗口 --
 
