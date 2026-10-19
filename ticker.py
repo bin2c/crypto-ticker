@@ -80,7 +80,7 @@ def _resolve_dirs():
 
 
 APP_DIR, RES_DIR = _resolve_dirs()   # APP_DIR=可写（配置/日志/缓存）  RES_DIR=只读资源
-APP_VERSION = "0.39"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
+APP_VERSION = "0.40"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 # ---------------------------------------------------------------- 默认配置 --
@@ -5022,6 +5022,187 @@ class ScanFloat:
         self.app._float_win = None
 
 
+class _TrayIcon:
+    """右下角通知区的托盘图标（纯 ctypes 调 Shell_NotifyIcon）。
+
+    为什么不用第三方库：这个程序只依赖标准库（tkinter + urllib），
+    托盘这件事用 Win32 也就几十行，没必要为此引入 pystray。
+
+    用法：
+        tray = _TrayIcon("assets\\行情条.ico", post=app._queue.put 的包装,
+                         on_open=..., on_float=..., on_quit=...)
+        tray.show(); tray.hide()
+    双击图标 = 还原窗口；右键 = 一个小菜单（显示 / 扫盘条 / 退出）。
+    """
+
+    WM_TRAYICON = 0x0400 + 20           # WM_APP + 20
+    NIM_ADD, NIM_DELETE = 0x0, 0x2
+    NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x1, 0x2, 0x4
+    WM_LBUTTONDBLCLK, WM_RBUTTONUP = 0x0203, 0x0205
+    WM_DESTROY, WM_NULL = 0x0002, 0x0000
+    IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE = 1, 0x10, 0x40
+    MF_STRING, MF_SEPARATOR = 0x0, 0x800
+    TPM_RETURNCMD, TPM_RIGHTBUTTON = 0x100, 0x2
+
+    class NOTIFYICONDATAW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("hWnd", wintypes.HWND),
+            ("uID", wintypes.UINT),
+            ("uFlags", wintypes.UINT),
+            ("uCallbackMessage", wintypes.UINT),
+            ("hIcon", wintypes.HICON),
+            ("szTip", wintypes.WCHAR * 128),
+            ("dwState", wintypes.DWORD),
+            ("dwStateMask", wintypes.DWORD),
+            ("szInfo", wintypes.WCHAR * 256),
+            ("uVersion", wintypes.UINT),
+            ("szInfoTitle", wintypes.WCHAR * 64),
+            ("dwInfoFlags", wintypes.DWORD),
+        ]
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [
+            ("style", wintypes.UINT),
+            ("lpfnWndProc", ctypes.c_void_p),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", wintypes.HANDLE),
+            ("hbrBackground", wintypes.HBRUSH),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+        ]
+
+    def __init__(self, icon_path, tip="行情条", post=None,
+                 on_open=None, on_float=None, on_quit=None):
+        self.icon_path = icon_path
+        self.tip = tip
+        self.post = post or (lambda fn: fn())
+        self.on_open = on_open
+        self.on_float = on_float
+        self.on_quit = on_quit
+        self._hwnd = None
+        self._hicon = None
+        self._added = False
+        self._thread = None
+        self._wndproc = None
+
+    # ---- 对外 ----
+    def show(self):
+        if self._thread and self._thread.is_alive():
+            return True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        for _ in range(40):                 # 最多等 2 秒，别卡 UI
+            if self._added:
+                return True
+            time.sleep(0.05)
+        return self._added
+
+    def hide(self):
+        hwnd = self._hwnd
+        if hwnd:
+            try:
+                u = ctypes.windll.user32
+                nid = self._nid(hwnd)
+                ctypes.windll.shell32.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(nid))
+            except Exception:
+                pass
+        self._added = False
+
+    # ---- 内部 ----
+    def _nid(self, hwnd):
+        nid = self.NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(self.NOTIFYICONDATAW)
+        nid.hWnd = hwnd
+        nid.uID = 1
+        nid.uFlags = self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP
+        nid.uCallbackMessage = self.WM_TRAYICON
+        nid.hIcon = self._hicon
+        nid.szTip = self.tip[:127]
+        return nid
+
+    def _run(self):
+        u = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        hinst = k32.GetModuleHandleW(None)
+
+        # 图标：优先用 assets 里的羽毛 ico
+        try:
+            self._hicon = u.LoadImageW(None, self.icon_path, self.IMAGE_ICON,
+                                       0, 0, self.LR_LOADFROMFILE | self.LR_DEFAULTSIZE)
+        except Exception:
+            self._hicon = None
+        if not self._hicon:
+            self._hicon = u.LoadIconW(None, ctypes.c_wchar_p(32512))   # IDI_APPLICATION
+
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+                                     wintypes.WPARAM, wintypes.LPARAM)
+
+        def proc(hwnd, msg, wparam, lparam):
+            try:
+                if msg == self.WM_TRAYICON:
+                    ev = int(lparam) & 0xFFFF
+                    if ev == self.WM_LBUTTONDBLCLK:
+                        if self.on_open:
+                            self.post(self.on_open)
+                    elif ev == self.WM_RBUTTONUP:
+                        self._popup(hwnd)
+                elif msg == self.WM_DESTROY:
+                    u.PostQuitMessage(0)
+                    return 0
+            except Exception:
+                pass
+            return u.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        self._wndproc = WNDPROC(proc)
+        cls_name = "CryptoTickerTrayWnd"
+        wc = self.WNDCLASSW()
+        wc.lpfnWndProc = ctypes.cast(self._wndproc, ctypes.c_void_p)
+        wc.hInstance = hinst
+        wc.lpszClassName = cls_name
+        u.RegisterClassW(ctypes.byref(wc))
+
+        HWND_MESSAGE = wintypes.HWND(-3)
+        self._hwnd = u.CreateWindowExW(0, cls_name, "行情条托盘", 0, 0, 0, 0, 0,
+                                       HWND_MESSAGE, None, hinst, None)
+        if not self._hwnd:
+            log("托盘: 建窗口失败")
+            return
+        nid = self._nid(self._hwnd)
+        self._added = bool(ctypes.windll.shell32.Shell_NotifyIconW(self.NIM_ADD,
+                                                                  ctypes.byref(nid)))
+        log(f"托盘图标{'已添加' if self._added else '添加失败'}")
+
+        msg = wintypes.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            u.TranslateMessage(ctypes.byref(msg))
+            u.DispatchMessageW(ctypes.byref(msg))
+
+    def _popup(self, hwnd):
+        u = ctypes.windll.user32
+        menu = u.CreatePopupMenu()
+        u.AppendMenuW(menu, self.MF_STRING, 1, "显示窗口")
+        u.AppendMenuW(menu, self.MF_STRING, 2, "悬浮扫盘条")
+        u.AppendMenuW(menu, self.MF_SEPARATOR, 0, None)
+        u.AppendMenuW(menu, self.MF_STRING, 3, "退出")
+        pt = wintypes.POINT()
+        u.GetCursorPos(ctypes.byref(pt))
+        u.SetForegroundWindow(hwnd)
+        cmd = u.TrackPopupMenu(menu, self.TPM_RETURNCMD | self.TPM_RIGHTBUTTON,
+                               pt.x, pt.y, 0, hwnd, None)
+        u.PostMessageW(hwnd, self.WM_NULL, 0, 0)
+        u.DestroyMenu(menu)
+        if cmd == 1 and self.on_open:
+            self.post(self.on_open)
+        elif cmd == 2 and self.on_float:
+            self.post(self.on_float)
+        elif cmd == 3 and self.on_quit:
+            self.post(self.on_quit)
+
+
 class TickerApp:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -5043,6 +5224,7 @@ class TickerApp:
         self._stop = threading.Event()
         self._save_job = None
         self._hidden = False
+        self._tray = None                  # 托盘图标（第一次隐藏窗口时创建）
         self._hwnd_cache = 0
         self._ct_dirty = False
         self._hotkey_map = {}
@@ -5588,15 +5770,66 @@ class TickerApp:
         save_config(self.cfg)
 
     def toggle_visible(self):
+        """显示 / 隐藏主窗口。
+
+        ★ 隐藏时**收到右下角托盘**（用户原话：「点隐藏窗口的时候，它会最小化到托盘，
+          然后我从右下角双击就可以重新打开」），双击托盘图标就回来。
+        """
         if self._hidden:
             self.root.deiconify()
             self._hidden = False
             self.root.attributes("-topmost", bool(self.cfg.get("always_on_top", True)))
             self.apply_click_through()
             self.apply_taskbar()            # 重新显出来时再把任务栏按钮补上
+            self._hide_tray()
         else:
             self.root.withdraw()
             self._hidden = True
+            self._show_tray()
+
+    # ------------------------------------------------------------ 托盘 --
+    def _tray_icon_path(self):
+        for base in (RES_DIR, APP_DIR):
+            p = os.path.join(base, "assets", "行情条.ico")
+            if os.path.exists(p):
+                return p
+        return ""
+
+    def _show_tray(self):
+        """把图标挂到通知区（第一次调用时创建线程和窗口）。"""
+        try:
+            if self._tray is None:
+                self._tray = _TrayIcon(
+                    self._tray_icon_path(),
+                    tip="行情条 · 双击打开",
+                    post=lambda fn: self._queue.put(("call", fn)),
+                    on_open=self._tray_open,
+                    on_float=self.open_float,
+                    on_quit=self.quit,
+                )
+            if self._tray.show():
+                log("已最小化到托盘（双击右下角图标打开；右键有菜单）")
+        except Exception as exc:
+            log(f"托盘图标创建失败: {exc}")
+
+    def _hide_tray(self):
+        try:
+            if self._tray is not None:
+                self._tray.hide()
+        except Exception:
+            pass
+
+    def _tray_open(self):
+        """托盘双击 / 菜单「显示窗口」。"""
+        if self._hidden:
+            self.toggle_visible()
+        else:
+            try:
+                self.root.deiconify()
+                self.root.lift()
+                self.root.attributes("-topmost", bool(self.cfg.get("always_on_top", True)))
+            except Exception:
+                pass
 
     def _warm_symbols(self):
         """后台预热合约清单与榜单，打开选择器时就不用等。"""
@@ -9998,6 +10231,7 @@ class TickerApp:
 
     def quit(self):
         self._stop.set()
+        self._hide_tray()
         self._wake.set()
         try:
             self._alerts.stop()
