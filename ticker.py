@@ -80,7 +80,7 @@ def _resolve_dirs():
 
 
 APP_DIR, RES_DIR = _resolve_dirs()   # APP_DIR=可写（配置/日志/缓存）  RES_DIR=只读资源
-APP_VERSION = "0.38"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
+APP_VERSION = "0.39"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 # ---------------------------------------------------------------- 默认配置 --
@@ -3828,6 +3828,8 @@ class ScanFloat:
         win.deiconify()
         win.update()
         self._place(x, y)
+        self._minimized = False
+        win.bind("<Map>", self._on_map, add="+")
         win.after(30, lambda: self._place(x, y))
         win.after(60, self._raise_bar)
         win.after(150, self._start_grab)
@@ -4013,6 +4015,82 @@ class ScanFloat:
         self._paint()
         self._paint_chips()
 
+    GWL_EXSTYLE = -20
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_APPWINDOW = 0x00040000
+
+    def _hwnd_root(self):
+        try:
+            return ctypes.windll.user32.GetAncestor(self.win.winfo_id(), 2)  # GA_ROOT
+        except Exception:
+            return 0
+
+    def _minimize(self, _event=None):
+        """最小化到任务栏。
+
+        `overrideredirect` 的窗口默认**不会**有任务栏按钮，直接 iconify 就"人间蒸发"了。
+        所以要先把扩展样式从 TOOLWINDOW 换成 APPWINDOW，再 `ShowWindow(SW_MINIMIZE)`；
+        还原时（`<Map>`）再把样式收回去，平时就不占任务栏格子。
+        同时把箭头键的全局抓取放掉 —— 最小化了还吃 ↑↓ 是耍流氓。
+        """
+        try:
+            u = ctypes.windll.user32
+            hwnd = self._hwnd_root()
+            ex = u.GetWindowLongW(hwnd, self.GWL_EXSTYLE)
+            u.SetWindowLongW(hwnd, self.GWL_EXSTYLE,
+                             (ex & ~self.WS_EX_TOOLWINDOW) | self.WS_EX_APPWINDOW)
+            self._minimized = True
+            self._rep_name = None
+            try:
+                self._grab.release()
+            except Exception:
+                pass
+            u.ShowWindow(hwnd, 6)          # SW_MINIMIZE
+            log("悬浮扫盘条已最小化（点任务栏图标 / 按 Ctrl+Alt+F / 点「扫盘」还原）")
+        except Exception as exc:
+            log(f"最小化失败: {exc}")
+        return "break"
+
+    def restore_view(self):
+        """从最小化（或隐藏）状态恢复并重新接管按键。"""
+        try:
+            u = ctypes.windll.user32
+            hwnd = self._hwnd_root()
+            if hwnd and u.IsIconic(hwnd):
+                u.ShowWindow(hwnd, 9)      # SW_RESTORE
+        except Exception:
+            pass
+        try:
+            self.win.deiconify()
+            self.win.lift()
+            self.win.focus_force()
+        except Exception:
+            pass
+        try:
+            self._start_grab()
+        except Exception:
+            pass
+
+    def _on_map(self, _event=None):
+        """窗口重新映射（任务栏点回来 / 被还原）：把任务栏样式收回去 + 重新抢键。"""
+        if not getattr(self, "_minimized", False):
+            return
+        self._minimized = False
+        try:
+            u = ctypes.windll.user32
+            hwnd = self._hwnd_root()
+            ex = u.GetWindowLongW(hwnd, self.GWL_EXSTYLE)
+            u.SetWindowLongW(hwnd, self.GWL_EXSTYLE,
+                             (ex & ~self.WS_EX_APPWINDOW) | self.WS_EX_TOOLWINDOW)
+        except Exception:
+            pass
+        try:
+            self._raise_bar()
+        except Exception:
+            pass
+        self.win.after(250, self._start_grab)
+        log("悬浮扫盘条已还原")
+
     def _toggle_compact(self, event=None):
         """小窗：只有名字 + 涨跌幅，缩成一小条扔角落；↑↓ 照样全局切 TV。"""
         where = ""
@@ -4140,10 +4218,12 @@ class ScanFloat:
         head.pack_propagate(False)
         self.lbl_title = tk.Label(head, text="扫盘", bg=self.c_bg, fg=UI_FG,
                                   font=(self.app.ui, 10, "bold"))
-        self.lbl_title.pack(side="left", padx=(12, 0))
+        # ⚠️ 先不 pack：pack 的顺序就是"抢空间的优先级"。标题/计数最后 pack，
+        #    窗口窄的时候被挤掉的是文字，而不是右边那排按钮
+        #    （以前 —— 会从 24px 被压成 4px，点都点不到）。
         self.lbl_count = tk.Label(head, text="", bg=self.c_bg, fg=UI_FAINT,
                                   font=(self.app.ui, 8))
-        self.lbl_count.pack(side="left", padx=(8, 0))
+
         self.lbl_dot = tk.Label(head, text="●", bg=self.c_bg, fg=UI_FAINT,
                                 font=(self.app.ui, 9))
         self.lbl_dot.pack(side="right", padx=(0, 6))
@@ -4163,12 +4243,23 @@ class ScanFloat:
                               lambda _e: self.btn_compact.configure(fg=UI_FG))
         self.btn_compact.bind("<Leave>",
                               lambda _e: self.btn_compact.configure(fg=UI_FAINT))
+        # 最小化到任务栏（和上面的「▁ 缩成小窗」不是一回事）
+        self.btn_min = tk.Label(head, text="—", bg=self.c_bg, fg=UI_FAINT,
+                                font=(self.app.ui, 9), cursor="hand2", padx=7)
+        self.btn_min.pack(side="right")
+        self.btn_min.bind("<Button-1>", self._minimize)
+        self.btn_min.bind("<Enter>", lambda _e: self.btn_min.configure(fg=UI_FG))
+        self.btn_min.bind("<Leave>", lambda _e: self.btn_min.configure(fg=UI_FAINT))
+        # 按钮都摆好了，再来放标题和计数（它们让位）
+        self.lbl_title.pack(side="left", padx=(12, 0))
+        self.lbl_count.pack(side="left", padx=(8, 0))
         # 拖标题栏挪位置（✕ 不参与，免得想点时把窗口拖着走）
         for w in (head, self.lbl_title, self.lbl_count, self.lbl_dot):
             w.bind("<Button-1>", self._drag_start)
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<ButtonRelease-1>", self._drag_end)
         tk.Frame(self.win, bg=self.c_sep, height=1).pack(fill="x")
+
 
     def _build_list(self):
         # 右边一条细滚动条：26 行看 745 个品种，没有滑条就只能靠按键翻
@@ -4914,6 +5005,10 @@ class ScanFloat:
             pass
         try:
             if getattr(self.app, "cfg", None) is not None:
+                # 记忆：下次打开回到同一个品种 / 同一个榜 / 同一个位置
+                if self.rows and 0 <= self.sel < len(self.rows):
+                    self.app.cfg["float_sel"] = str(
+                        self.rows[self.sel].get("base") or "").upper()
                 self.app.cfg["float_compact"] = self.compact
                 if not self.compact:
                     self.app.cfg["float_size"] = [self.width, self.height]
@@ -8359,9 +8454,7 @@ class TickerApp:
         if win is not None:
             try:
                 if win.win.winfo_exists():
-                    win.win.deiconify()
-                    win.win.lift()
-                    win.win.focus_force()
+                    win.restore_view()      # 最小化过也能叫回来
                     win.refresh()
                     return
             except Exception:
@@ -8380,6 +8473,9 @@ class TickerApp:
             alive = bool(win is not None and win.win.winfo_exists())
         except Exception:
             alive = False
+        if alive and getattr(win, "_minimized", False):
+            win.restore_view()              # 最小化时按热键 = 还原，不是关掉
+            return
         if alive:
             win.close()
             log("悬浮扫盘条已关闭")
