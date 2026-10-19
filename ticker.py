@@ -80,7 +80,7 @@ def _resolve_dirs():
 
 
 APP_DIR, RES_DIR = _resolve_dirs()   # APP_DIR=可写（配置/日志/缓存）  RES_DIR=只读资源
-APP_VERSION = "0.37"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
+APP_VERSION = "0.38"           # 和 CHANGELOG 对齐；设置 →「关于」里显示
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 # ---------------------------------------------------------------- 默认配置 --
@@ -4401,11 +4401,10 @@ class ScanFloat:
             rows = sorted(rows, key=lambda r: float(r.get("change") or 0))
         elif self.mode in ("oi4", "oi24"):
             rows = self._oi_rows(rows, "topOI" if self.mode == "oi4" else "topOI24")
-        # 收藏（金星）排在整张榜最上面 —— 自选就那么几个，最该一眼看到
-        if rows and self.cat != "fav" and self.favs:
-            head = [r for r in rows if str(r.get("base") or "").upper() in self.favs]
-            rest = [r for r in rows if str(r.get("base") or "").upper() not in self.favs]
-            rows = head + rest
+        # ⚠️ 以前这里把收藏项无条件插到整张榜最前面，结果**任何榜单的头两行
+        #    永远是同一个币**（用户原话：「无论什么品种，前面两个都是 DODX 还有 0G，
+        #    这明显是 bug」）。榜单就该按自己的排序来；要看收藏有独立的「收藏」分类，
+        #    ★ 只作为行首标记，不再改顺序。
         self.rows = rows
         if keep_pos and rows:
             span = max(0, len(rows) - self.n)
@@ -4478,6 +4477,7 @@ class ScanFloat:
 
         key="topOI" 是 4 小时窗口，key="topOI24" 是 24 小时窗口。
         """
+        self._oi_pending_reason = ""          # 有数据就清掉“计算中”提示
         order = []
         by_item = {}
         try:
@@ -4509,9 +4509,10 @@ class ScanFloat:
                 out.append({"base": base, "price": None,
                             "change": item.get("change"), "oi_chg": True})
         if not out:
-            # 榜还没算出来：先按持仓名义价值从大到小顶着
-            out = sorted(rows, key=lambda r: float(r.get("oi") or 0),
-                         reverse=True)[:20]
+            # ⚠️ 榜还没算出来时**不要**拿缓存行顶上：那时候展示的是价格涨跌、
+            #    顺序还是 A→Z，看起来就像“持仓榜算错了”。宁可直接空着，
+            #    由页脚提示「计算中」（第一轮大约 20–40 秒）。
+            self._oi_pending_reason = "计算中…"
         return out[:20]
 
     # ---- 键盘 ------------------------------------------------------------
@@ -4570,7 +4571,8 @@ class ScanFloat:
                 moved = True
             self._want_sel = ""
         if self._pending and self.rows:
-            self.sel = (self.sel + self._pending) % len(self.rows)
+            # 同样不取模：到头锁死
+            self.sel = max(0, min(len(self.rows) - 1, self.sel + self._pending))
             self._pending = 0
             moved = True
         self._paint()
@@ -4735,7 +4737,12 @@ class ScanFloat:
         if not self.rows:
             self._pending += delta      # 数据还没到，先记住按了几下
             return "break"
-        self.sel = (self.sel + delta) % len(self.rows)
+        # 到头就停住（不要取模绕回第一名）：用户原话「拖动条不要从最后一个自动跳到第一个，
+        # 它是锁死的，到了最后就是到底了」。
+        before = self.sel
+        self.sel = max(0, min(len(self.rows) - 1, self.sel + delta))
+        if self.sel == before:
+            return "break"
         self._paint()
         self._push()
         return "break"
@@ -4838,6 +4845,9 @@ class ScanFloat:
         else:
             if self.cat == "fav" and not self.favs:
                 pos = "还没收藏 · 点行首 ☆"
+            elif self.mode in ("oi4", "oi24") and getattr(self, "_oi_pending_reason", ""):
+                # 持仓榜第一轮要扫 520 个币（20–40 秒），此时不要说"没有品种"
+                pos = self._oi_pending_reason or "计算中…"
             elif self.base_rows:
                 pos = "这个筛选没有品种"
             else:
@@ -4851,9 +4861,17 @@ class ScanFloat:
         on = bool(bridge and bridge.online())
         self.lbl_dot.configure(fg=UI_OK if on else UI_WARN)
         if self.lbl_foot is not None:
-            self.lbl_foot.configure(
-                text=("TV 已连接 · 按住 ↑↓ 连着切" if on
-                      else "TV 未连接 · 装 tv-ext 扩展"))
+            base = ("TV 已连接 · 按住 ↑↓ 连着切" if on
+                    else "TV 未连接 · 装 tv-ext 扩展")
+            if self.mode in ("oi4", "oi24"):
+                # 这两榜算的是**币安永续**的持仓量变化，不是全网聚合，
+                # 标出来免得跟 coinalyze 那种多交易所的数字对不上时以为算错；
+                # 还没算出来时显示“计算中…”，因为第一轮要扫 520 个币
+                base = "币安持仓%s · %s" % (
+                    "4H" if self.mode == "oi4" else "24H",
+                    getattr(self, "_oi_pending_reason", "")
+                    or ("TV 已连接" if on else "TV 未连接"))
+            self.lbl_foot.configure(text=base)
         try:
             self._paint_chips()
             self._paint_scrollbar()
